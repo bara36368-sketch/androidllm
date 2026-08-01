@@ -1,22 +1,19 @@
 #!/data/data/com.termux/files/usr/bin/bash
 # androidllm setup for plain Termux (no proot, no distro).
-# Installs the package, builds the NEON kernel, downloads a model from HF,
-# and shards it into androidllm layer files.
+# One-time env setup: installs deps, copies the repo, builds the NEON kernel,
+# installs the package, then shards the requested model.
 #
 # Usage:
-#   bash setup_termux.sh [MODEL_ID] [OUT_NAME]
+#   bash setup_termux.sh [MODEL_REPO] [ID]
 #   bash setup_termux.sh Qwen/Qwen2.5-1.5B-Instruct qwen15
 #
 # Works whether you cloned the repo to ~/androidllm or copied just this
 # script; the full repo is copied into ~/androidllm if needed.
 set -euo pipefail
 
-MODEL_ID="${1:-Qwen/Qwen2.5-1.5B-Instruct}"
-OUT_NAME="${2:-qwen15}"
+MODEL_REPO="${1:-Qwen/Qwen2.5-1.5B-Instruct}"
+ID="${2:-qwen15}"
 APP_DIR="$HOME/androidllm"
-MODEL_DIR="$APP_DIR/models/src-${OUT_NAME}"
-OUT_DIR="$APP_DIR/models/${OUT_NAME}"
-BASE="https://huggingface.co/${MODEL_ID}/resolve/main"
 
 echo "== androidllm setup =="
 pkg update -y
@@ -40,19 +37,10 @@ python -m pip install -e "$APP_DIR" || python -m pip install "$APP_DIR"
 echo ">> building NEON kernel ..."
 bash "$APP_DIR/scripts/build_neon.sh" || echo "(neon build skipped; numpy fallback will be used)"
 
-# Download config + tokenizer + a single-shard weight file with resume.
-echo ">> downloading ${MODEL_ID} ..."
-mkdir -p "$MODEL_DIR"
-for f in config.json tokenizer.json tokenizer_config.json generation_config.json model.safetensors; do
-  if [ ! -s "$MODEL_DIR/$f" ]; then
-    wget -q --show-progress --continue -O "$MODEL_DIR/$f" "$BASE/$f" \
-      || echo "(failed to fetch $f; skipping)"
-  fi
-done
-
-echo ">> sharding ${MODEL_ID} -> $OUT_DIR ..."
-python -m androidllm.shard --source "$MODEL_DIR" --out "$OUT_DIR"
+echo ">> sharding ${MODEL_REPO} -> models/${ID} ..."
+bash "$APP_DIR/scripts/shard_model.sh" "$MODEL_REPO" "$ID"
 
 echo
 echo "== done. Serve with:"
-echo "   androidllm-serve --model $OUT_DIR --port 8080"
+echo "   androidllm-serve --model $APP_DIR/models/$ID --port 8080"
+echo "Switch models anytime:  bash $APP_DIR/scripts/switch_model.sh <id>"

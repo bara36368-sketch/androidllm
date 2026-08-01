@@ -115,6 +115,21 @@ androidllm/          package (numpy only)
   shard.py           HF model dir -> layer shards + manifest
   tokenizer.py       byte-level BPE + chat templates + HF convert
 src/androidllm_neon.c   ARM NEON fp16 kernel
-scripts/                setup_termux.sh, build_neon.sh
+scripts/                setup_termux.sh, shard_model.sh, switch_model.sh, build_neon.sh
 tests/                  roundtrip + equality tests
 ```
+
+## Switching models (one at a time)
+
+Only one model is served at a time. A `current_model.json` state file in
+`~/androidllm` records the active shard; `runner.py` (which supervises
+`androidllm-serve`) restarts the server on the model it points to.
+
+```
+bash scripts/switch_model.sh qwen15   # switch to an already-sharded model
+bash scripts/shard_model.sh Qwen/Qwen3-1.7B-Instruct qwen3   # shard a new one first
+```
+
+The Telegram bot's `/model` command lists the recommended models (qwen15,
+smollm2, qwen3) with shard status, switches between them, and auto-downloads
++ shards any you pick that isn't sharded yet.
