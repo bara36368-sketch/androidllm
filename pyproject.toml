@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "androidllm"
+version = "0.1.0"
+description = "AirLLM-style layer-streaming LLM inference for Android/Termux. No torch. Pure numpy + optional ARM NEON kernel."
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+authors = [{name = "androidllm contributors"}]
+dependencies = ["numpy>=1.24"]
+
+[project.optional-dependencies]
+hub = ["huggingface_hub>=0.23"]
+
+[project.scripts]
+androidllm-shard = "androidllm.shard:main"
+androidllm-serve = "androidllm.serve:main"
+
+[tool.setuptools]
+packages = ["androidllm", "androidllm.models"]
