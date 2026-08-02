@@ -2,6 +2,7 @@ import argparse
 import json
 import os
 import re
+import secrets
 import threading
 import time
 
@@ -9,6 +10,55 @@ from .engine import LayerStreamingEngine
 from .json_grammar import JsonGrammar
 from .batching import BatchScheduler, SessionPool
 from . import neon
+
+
+def _api_key_path():
+    """Where the auto-generated API key lives (~/.androidllm/api_key)."""
+    base = os.environ.get("ANDROIDLLM_DIR", os.path.expanduser("~/androidllm"))
+    return os.path.join(base, "api_key")
+
+
+def _load_api_key():
+    """Resolve the server API key:
+    1. --api-key flag (handled by caller via ANDROIDLLM_API_KEY env)
+    2. ANDROIDLLM_API_KEY env
+    3. persisted key file (survives restarts)
+    4. generate a fresh random key, persist it, and return it.
+    Returns (key, generated) where generated tells the caller to log it."""
+    key = os.environ.get("ANDROIDLLM_API_KEY", "").strip()
+    if key:
+        return key, False
+    p = _api_key_path()
+    try:
+        with open(p, encoding="utf-8") as f:
+            key = f.read().strip()
+        if len(key) >= 16:
+            return key, False
+    except OSError:
+        pass
+    key = "sk-androidllm-" + secrets.token_hex(24)
+    try:
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(key + "\n")
+    except OSError:
+        pass
+    return key, True
+
+
+def _check_auth(handler, key):
+    """Validate the Authorization header against the server key.
+    Returns True if authorized; otherwise writes a 401 and returns False."""
+    if not key:
+        return True
+    header = handler.headers.get("Authorization", "")
+    if header.startswith("Bearer ") and secrets.compare_digest(
+            header[len("Bearer "):].strip(), key):
+        return True
+    handler._reply(401, {"error": "invalid api key",
+                         "message": "provide a valid api key via "
+                                    "'Authorization: Bearer <key>'"})
+    return False
 
 
 def _parse_model_name(engine, name):
@@ -234,6 +284,13 @@ _ROUTES = [
 def run_server(engine, host="127.0.0.1", port=8080):
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+    api_key, key_generated = _load_api_key()
+    if api_key and key_generated:
+        print(">> generated new API key: %s" % api_key)
+        print(">> saved to %s (reuse it as ANDROIDLLM_API_KEY)" % _api_key_path())
+    elif api_key:
+        print(">> API key auth enabled (ANDROIDLLM_API_KEY)")
+
     scheduler = BatchScheduler(engine,
                                max_slots=int(os.environ.get("ANDROIDLLM_BATCH_MAX", "4")))
     pool = SessionPool(engine, max_pooled=4)
@@ -273,17 +330,23 @@ def run_server(engine, host="127.0.0.1", port=8080):
             if self.path == "/health":
                 idle_since = time.time()
                 self._reply(200, {"status": "ok"})
-            elif self.path == "/v1/models":
+            elif self.path in ("/v1/models", "/stats", "/v1/keys") or self.path.startswith("/v1/"):
+                if not _check_auth(self, api_key):
+                    return
                 idle_since = time.time()
-                self._reply(200, _models_list(engine))
-            elif self.path == "/stats":
-                info = battery_info()
-                snap = dict(engine.snapshot(), battery=info)
-                snap["strip_think"] = _STRIP_THINK
-                snap["pause_pct"] = _PAUSE_PCT
-                snap["batch"] = scheduler.snapshot()
-                snap["pooled"] = len(pool)
-                self._reply(200, snap)
+                if self.path == "/v1/models":
+                    self._reply(200, _models_list(engine))
+                elif self.path == "/v1/keys":
+                    self._reply(200, {"api_key": api_key,
+                                      "base_url": "http://%s:%d/v1" % (host, port)})
+                else:
+                    info = battery_info()
+                    snap = dict(engine.snapshot(), battery=info)
+                    snap["strip_think"] = _STRIP_THINK
+                    snap["pause_pct"] = _PAUSE_PCT
+                    snap["batch"] = scheduler.snapshot()
+                    snap["pooled"] = len(pool)
+                    self._reply(200, snap)
             else:
                 self._reply(404, {"error": "not found"})
 
@@ -376,6 +439,8 @@ def run_server(engine, host="127.0.0.1", port=8080):
 
         def do_POST(self):
             nonlocal idle_since
+            if not _check_auth(self, api_key):
+                return
             length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(length).decode("utf-8"))
             for pat, kind in _ROUTES:
@@ -481,7 +546,12 @@ def main():
     ap.add_argument("--model", required=True, help="path to sharded model dir")
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8080)
+    ap.add_argument("--api-key", default=os.environ.get("ANDROIDLLM_API_KEY", ""),
+                    help="require this key via Authorization: Bearer; "
+                         "defaults to a random key generated on first run")
     args = ap.parse_args()
+    if args.api_key:
+        os.environ["ANDROIDLLM_API_KEY"] = args.api_key
     engine = build_engine(args.model)
     run_server(engine, args.host, args.port)
 

@@ -117,6 +117,24 @@ python tests/test_streaming.py  # engine == all-layers-loaded, generate
 The key invariant: `test_streaming.py` proves streaming through layer files
 produces identical logits to loading the whole model into RAM.
 
+## API key auth
+
+`serve.py` protects every `/v1/*` route (and `/stats`) with a bearer token:
+
+- Set `--api-key <key>` or `ANDROIDLLM_API_KEY=<key>` to pin a key.
+- Otherwise the server generates a random key on first run, prints it on
+  startup, and persists it to `~/.androidllm/api_key` for reuse.
+- `/health` stays unauthenticated so the supervisor can probe it.
+- To see the key again: `cat ~/.androidllm/api_key`, or
+  `curl -H "Authorization: Bearer $(cat ~/.androidllm/api_key)" http://127.0.0.1:8080/v1/keys`
+
+```bash
+curl http://127.0.0.1:8080/v1/chat/completions \
+  -H "Authorization: Bearer $(cat ~/.androidllm/api_key)" \
+  -H "Content-Type: application/json" \
+  -d '{"messages":[{"role":"user","content":"hi"}],"max_tokens":32}'
+```
+
 ## Project layout
 
 ```
