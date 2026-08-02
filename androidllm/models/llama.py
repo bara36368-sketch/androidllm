@@ -9,7 +9,7 @@ from ..neon import matmul_f16
 try:
     import androidllm_rs as _rs
 
-    _HAS_RS = True
+    _HAS_RS = hasattr(_rs, "layer_forward")
     _RS_THREADS = int(os.environ.get("ANDROIDLLM_THREADS", "4"))
 except Exception:
     _rs = None

@@ -36,6 +36,10 @@ jobs:
         run: |
           pip install --upgrade pip
           pip install -e ".[dev]"
+      - name: Build Rust accelerator (androidllm_rs)
+        run: |
+          pip install maturin
+          pip install ./androidllm_rs
       - name: Run tests
         run: pytest
 

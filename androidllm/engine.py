@@ -17,7 +17,7 @@ from .safetensors import read_header, read_tensor
 try:
     import androidllm_rs as _rs
 
-    _HAS_RS_SAMPLE = True
+    _HAS_RS_SAMPLE = hasattr(_rs, "sample")
 except Exception:
     _rs = None
     _HAS_RS_SAMPLE = False
