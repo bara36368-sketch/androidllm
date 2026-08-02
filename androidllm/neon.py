@@ -5,8 +5,14 @@ import numpy as np
 
 _FALLBACK = True
 _lib = None
+_THREADS = int(os.environ.get("ANDROIDLLM_THREADS", "4"))
 
 _SO_NAME = "libandroidllm_neon.so"
+
+
+def set_threads(n):
+    global _THREADS
+    _THREADS = max(1, int(n))
 
 
 def _load():
@@ -19,7 +25,8 @@ def _load():
                 lib = ctypes.CDLL(so)
                 lib.matmul_f16_f16.argtypes = [
                     ctypes.POINTER(ctypes.c_uint16), ctypes.POINTER(ctypes.c_uint16),
-                    ctypes.POINTER(ctypes.c_uint16), ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                    ctypes.POINTER(ctypes.c_uint16), ctypes.c_int, ctypes.c_int,
+                    ctypes.c_int, ctypes.c_int,
                 ]
                 _lib = lib
                 _FALLBACK = False
@@ -39,7 +46,7 @@ def matmul_f16(a, b, _=None):
         _lib.matmul_f16_f16(a.ctypes.data_as(ctypes.POINTER(ctypes.c_uint16)),
                             b.ctypes.data_as(ctypes.POINTER(ctypes.c_uint16)),
                             out.ctypes.data_as(ctypes.POINTER(ctypes.c_uint16)),
-                            m, k, n)
+                            m, k, n, _THREADS)
         return out
     return a @ b.T
 

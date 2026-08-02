@@ -1,8 +1,20 @@
 import math
+import os
 
 import numpy as np
 
 from ..neon import matmul_f16
+
+# Optional Rust acceleration
+try:
+    import androidllm_rs as _rs
+
+    _HAS_RS = True
+    _RS_THREADS = int(os.environ.get("ANDROIDLLM_THREADS", "4"))
+except Exception:
+    _rs = None
+    _HAS_RS = False
+    _RS_THREADS = 4
 
 
 def rms_norm(x, w, eps=1e-6):
@@ -56,6 +68,31 @@ class LlamaModel:
         self.rope = precompute_rope(self.head_dim, canon["max_len"], self.rope_theta)
 
     def layer_forward(self, x, layer, kv, pos):
+        if _HAS_RS:
+            # x: (1, hidden) f32 -> f16 for rust
+            # kv_k, kv_v: (max_len, kv_heads, head_dim) f16
+            kv_k, kv_v = kv
+            # Ensure contiguous arrays for PyO3
+            x_f16 = x.astype(np.float16).reshape(1, -1)
+            # rope is already (max_len, head_dim) f16
+            # layer is a dict of f16 arrays (q,k,v,o,gate,up,down,n_in,n_post)
+            # Must ensure dict values are contiguous f16 arrays
+            rust_layer = {k: np.ascontiguousarray(v, dtype=np.float16) for k, v in layer.items()}
+            out = _rs.layer_forward(
+                x_f16,
+                rust_layer,
+                kv_k,
+                kv_v,
+                pos,
+                self.rope,
+                self.heads,
+                self.kv_heads,
+                self.head_dim,
+                self.rms_eps,
+            )
+            return out.astype(np.float16)
+
+        # numpy fallback (original)
         q = quantized_mm(x, layer["q"]).reshape(1, self.heads, self.head_dim)
         k = quantized_mm(x, layer["k"]).reshape(1, self.kv_heads, self.head_dim)
         v = quantized_mm(x, layer["v"]).reshape(1, self.kv_heads, self.head_dim)
@@ -82,16 +119,27 @@ class LlamaModel:
         x = rms_norm(x, layer["n_post"], self.rms_eps).astype(np.float16)
         return x
 
-    def forward_one(self, token, layer, kv, pos):
-        x = self.embed[token].reshape(1, self.hidden)
-        x = self.layer_forward(x, layer, kv, pos)
-        return x
-
     def logits(self, x):
+        if _HAS_RS:
+            # x: (1, hidden) f32
+            # final_norm: (hidden,) f16
+            # lm_head or embed: (vocab, hidden) f16
+            w = self.lm_head if self.lm_head is not None else self.embed
+            out = _rs.head_logits(
+                x.astype(np.float16).reshape(-1),
+                np.ascontiguousarray(self.final_norm, dtype=np.float16),
+                np.ascontiguousarray(w, dtype=np.float16),
+                self.rms_eps,
+            )
+            return out.astype(np.float32).reshape(1, -1)
+
         h = rms_norm(x, self.final_norm, self.rms_eps)
         w = self.lm_head if self.lm_head is not None else self.embed
         return (h.astype(np.float16) @ w.astype(np.float16).T).astype(np.float32)
 
     def prepare_kv(self, max_len):
+        """Per-layer KV cache: every layer gets its own (k, v) buffers so
+        attention at layer l only ever sees layer l's keys/values."""
         shape = (max_len, self.kv_heads, self.head_dim)
-        return (np.zeros(shape, dtype=np.float16), np.zeros(shape, dtype=np.float16))
+        return [(np.zeros(shape, dtype=np.float16), np.zeros(shape, dtype=np.float16))
+                for _ in range(self.canon["layers"])]

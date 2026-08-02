@@ -11,5 +11,5 @@ OUT_DIR="${1:-$HOME/.androidllm}"
 
 mkdir -p "$OUT_DIR"
 echo ">> compiling $SRC -> $OUT_DIR/libandroidllm_neon.so"
-clang -O3 -ffast-math -fPIC -shared -o "$OUT_DIR/libandroidllm_neon.so" "$SRC"
+clang -O3 -ffast-math -fPIC -shared -pthread -o "$OUT_DIR/libandroidllm_neon.so" "$SRC"
 echo ">> done: $OUT_DIR/libandroidllm_neon.so"

@@ -29,6 +29,7 @@ if [ ! -e "$APP_DIR/pyproject.toml" ]; then
   echo ">> copying androidllm repo into $APP_DIR ..."
   mkdir -p "$APP_DIR"
   cp -r "$ROOT/androidllm" "$ROOT/src" "$ROOT/scripts" \
+        "$ROOT/androidllm_rs" \
         "$ROOT/pyproject.toml" "$ROOT/README.md" "$APP_DIR/"
 fi
 cd "$APP_DIR"
@@ -36,6 +37,11 @@ python -m pip install -e "$APP_DIR" || python -m pip install "$APP_DIR"
 
 echo ">> building NEON kernel ..."
 bash "$APP_DIR/scripts/build_neon.sh" || echo "(neon build skipped; numpy fallback will be used)"
+
+echo ">> building Rust accelerator (androidllm_rs) ..."
+pkg install -y rust || true
+python -m pip install maturin || true
+bash "$APP_DIR/scripts/build_rust.sh" || echo "(rust build skipped; numpy fallback will be used)"
 
 echo ">> sharding ${MODEL_REPO} -> models/${ID} ..."
 bash "$APP_DIR/scripts/shard_model.sh" "$MODEL_REPO" "$ID"

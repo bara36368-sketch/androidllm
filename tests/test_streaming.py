@@ -101,7 +101,7 @@ def run_reference(prompt):
     x = model.embed[prompt[0]].reshape(1, -1)
     for pos in range(len(prompt)):
         for l in range(CANON["layers"]):
-            x = model.layer_forward(x, layers[l], kv, pos)
+            x = model.layer_forward(x, layers[l], kv[l], pos)
     return model.logits(x)
 
 
@@ -115,7 +115,7 @@ def run_streaming(prompt):
             layer = pending.result()
             pending = (engine._pool.submit(engine.load_layer, l + 1)
                        if l + 1 < engine.n_layers else None)
-            x = engine.model.layer_forward(x, layer, kv, pos)
+            x = engine.model.layer_forward(x, layer, kv[l], pos)
     return engine.model.logits(x)
 
 

@@ -65,60 +65,48 @@ def _scale_name(base):
     return base + ".scale"
 
 
-def shard_model(source, out, attn_bits=4, mlp_bits=8, block=64):
-    config_path = os.path.join(source, "config.json")
-    if not os.path.exists(config_path):
-        raise FileNotFoundError(f"no config.json in {source}")
-    canon = load_config(config_path)
-    files = sorted(glob.glob(os.path.join(source, "*.safetensors")))
-    if not files:
-        raise FileNotFoundError(f"no safetensors files in {source}")
-
+def shard_from_tensors(source_tensors, canon, out, attn_bits=4, mlp_bits=8,
+                       block=64, embed_bits=8):
+    """Quantize + write shards from a dict of HF-style tensor names. Shared
+    by the safetensors and GGUF import paths."""
     layout = {}
-    file_meta = {}
-    for f in files:
-        header, data_start, _ = read_header(f)
-        file_meta[f] = data_start
-        for name, meta in header.items():
-            kind, key = classify(name)
-            layout[name] = (f, meta["dtype"], tuple(meta["shape"]),
-                            meta["data_offsets"], kind, key)
+    for name, arr in source_tensors.items():
+        kind, key = classify(name)
+        if kind == "other":
+            continue
+        layout[name] = (kind, key, arr)
 
     os.makedirs(out, exist_ok=True)
-    tok_json = os.path.join(source, "tokenizer.json")
-    if os.path.exists(tok_json):
-        from .tokenizer import convert_hf_tokenizer
-        convert_hf_tokenizer(tok_json, out,
-                             tokenizer_config_path=os.path.join(source, "tokenizer_config.json"))
     quant_meta = {}
+    embed_quant = {}
+    lm_head_quant = {}
     global_tensors = {}
     layer_tensors = {}
 
-    def read_matrix(name):
-        f, dtype_name, shape, (a, b), _, _ = layout[name]
-        nbytes = b - a
-        with open(f, "rb") as fh:
-            fh.seek(file_meta[f] + a)
-            blob = fh.read(nbytes)
-        if dtype_name == "BF16":
-            return bf16_to_f32(np.frombuffer(blob, dtype=np.uint16).reshape(shape))
-        np_dtype = np.float16 if dtype_name == "F16" else np.float32
-        return np.frombuffer(blob, dtype=np_dtype).reshape(shape).astype(np.float32)
-
-    for name, (f, dtype_name, shape, offs, kind, key) in layout.items():
-        if kind == "other":
-            continue
+    for name, (kind, key, arr) in layout.items():
+        w = arr() if callable(arr) else arr
+        w = np.ascontiguousarray(w, dtype=np.float32)
         if kind == "global":
-            w = read_matrix(name)
-            global_tensors[key] = w.astype(np.float16)
+            if key == "embed" and embed_bits:
+                q, scale = quantize_matrix(w, bits=embed_bits, block=w.shape[1])
+                global_tensors["embed.q"] = pack_int4(q) if embed_bits == 4 else q.astype(np.int8)
+                global_tensors["embed.scale"] = scale.astype(np.float16)
+                embed_quant = {"bits": embed_bits, "block": int(w.shape[1]),
+                               "out": int(w.shape[0]), "in": int(w.shape[1])}
+            elif key == "lm_head" and embed_bits:
+                q, scale = quantize_matrix(w, bits=embed_bits, block=w.shape[1])
+                global_tensors["lm_head.q"] = pack_int4(q) if embed_bits == 4 else q.astype(np.int8)
+                global_tensors["lm_head.scale"] = scale.astype(np.float16)
+                lm_head_quant = {"bits": embed_bits, "block": int(w.shape[1]),
+                                 "out": int(w.shape[0]), "in": int(w.shape[1])}
+            else:
+                global_tensors[key] = w.astype(np.float16)
             continue
         layer = key[0]
         bucket = layer_tensors.setdefault(layer, {})
         if kind == "norm":
-            w = read_matrix(name)
             bucket.setdefault("norms", {})[key[1]] = w.astype(np.float16)
             continue
-        w = read_matrix(name)
         bits = attn_bits if kind == "attn" else mlp_bits
         q, scale = quantize_matrix(w, bits=bits, block=block)
         base = key[1].split("_")[0]
@@ -141,12 +129,12 @@ def shard_model(source, out, attn_bits=4, mlp_bits=8, block=64):
         del layer_tensors[layer_id]
 
     write_safetensors(os.path.join(out, "embeddings.safetensors"),
-                      {"embed": global_tensors["embed"]})
+                      {k: v for k, v in global_tensors.items() if k.startswith("embed")})
     write_safetensors(os.path.join(out, "norms.safetensors"),
                       {"final_norm": global_tensors["final_norm"]})
-    if "lm_head" in global_tensors:
+    if "lm_head" in global_tensors or lm_head_quant:
         write_safetensors(os.path.join(out, "lm_head.safetensors"),
-                          {"lm_head": global_tensors["lm_head"]})
+                          {k: v for k, v in global_tensors.items() if k.startswith("lm_head")})
 
     manifest = {
         "format": "androidllm/v1",
@@ -154,12 +142,56 @@ def shard_model(source, out, attn_bits=4, mlp_bits=8, block=64):
         "config": canon,
         "quant": {"attn_bits": attn_bits, "mlp_bits": mlp_bits, "block": block,
                   "layers": quant_meta},
+        "embed_quant": embed_quant,
+        "lm_head_quant": lm_head_quant,
         "tied": canon["tied"],
-        "has_lm_head": "lm_head" in global_tensors,
+        "has_lm_head": bool(lm_head_quant) or "lm_head" in global_tensors,
     }
     with open(os.path.join(out, "manifest.json"), "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2)
     return manifest
+
+
+def shard_model(source, out, attn_bits=4, mlp_bits=8, block=64, embed_bits=8):
+    config_path = os.path.join(source, "config.json")
+    if not os.path.exists(config_path):
+        raise FileNotFoundError(f"no config.json in {source}")
+    canon = load_config(config_path)
+    files = sorted(glob.glob(os.path.join(source, "*.safetensors")))
+    if not files:
+        raise FileNotFoundError(f"no safetensors files in {source}")
+
+    layout = {}
+    file_meta = {}
+    for f in files:
+        header, data_start, _ = read_header(f)
+        file_meta[f] = data_start
+        for name, meta in header.items():
+            kind, key = classify(name)
+            layout[name] = (f, meta["dtype"], tuple(meta["shape"]),
+                            meta["data_offsets"], kind, key)
+
+    tok_json = os.path.join(source, "tokenizer.json")
+    if os.path.exists(tok_json):
+        from .tokenizer import convert_hf_tokenizer
+        convert_hf_tokenizer(tok_json, out,
+                             tokenizer_config_path=os.path.join(source, "tokenizer_config.json"))
+
+    def read_matrix(name):
+        f, dtype_name, shape, (a, b), _, _ = layout[name]
+        nbytes = b - a
+        with open(f, "rb") as fh:
+            fh.seek(file_meta[f] + a)
+            blob = fh.read(nbytes)
+        if dtype_name == "BF16":
+            return bf16_to_f32(np.frombuffer(blob, dtype=np.uint16).reshape(shape))
+        np_dtype = np.float16 if dtype_name == "F16" else np.float32
+        return np.frombuffer(blob, dtype=np_dtype).reshape(shape).astype(np.float32)
+
+    tensors = {name: (lambda n=name: read_matrix(n))
+               for name in layout if classify(name)[0] != "other"}
+    return shard_from_tensors(tensors, canon, out, attn_bits, mlp_bits,
+                              block, embed_bits)
 
 
 def main():
@@ -169,8 +201,11 @@ def main():
     ap.add_argument("--attn-bits", type=int, default=4)
     ap.add_argument("--mlp-bits", type=int, default=8)
     ap.add_argument("--block", type=int, default=64)
+    ap.add_argument("--embed-bits", type=int, default=8,
+                    help="quantize the embedding table (and lm_head if untied); 0 = keep f16")
     args = ap.parse_args()
-    shard_model(args.source, args.out, args.attn_bits, args.mlp_bits, args.block)
+    shard_model(args.source, args.out, args.attn_bits, args.mlp_bits,
+                args.block, args.embed_bits)
     print(f"sharded to {args.out}")
 
 

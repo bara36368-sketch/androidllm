@@ -1,0 +1,21 @@
+[package]
+name = "androidllm_rs"
+version = "0.1.0"
+edition = "2021"
+description = "PyO3 accelerator core for androidllm (fused llama layer forward, head matmul, sampling)"
+license = "MIT"
+
+[lib]
+name = "androidllm_rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.27", features = ["extension-module", "abi3-py39"] }
+numpy = { version = "0.27", features = ["half"] }
+half = "2.4"
+rayon = "1.10"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

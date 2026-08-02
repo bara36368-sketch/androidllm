@@ -64,6 +64,22 @@ bash scripts/build_neon.sh    # needs `clang` from Termux
 Loads `libandroidllm_neon.so` from the repo root or `~/.androidllm`;
 falls back to numpy automatically. See `src/androidllm_neon.c`.
 
+4. **Optional Rust accelerator** (`androidllm_rs`, PyO3):
+
+```
+pkg install rust            # Termux
+python -m pip install maturin
+bash scripts/build_rust.sh  # builds the wheel and pip-installs it
+```
+
+Fuses the per-layer forward (7 matmuls + rope + GQA attention + swiglu +
+rms_norm), the head matmul, and sampling into native calls. Semantics match
+the numpy path (same f16 weights, f32 accumulation); outputs are bit-equal
+at the matmul level and differ only in f16 rounding at the very end.
+On the toy model this gives ~2x on layer_forward; larger models (hidden
+1024+) benefit more since matmuls dominate. Falls back to numpy when the
+module is missing. See `androidllm_rs/`.
+
 ## Model fit for a 4 GB phone
 
 | model | params | Q4 disk | notes |
@@ -107,7 +123,7 @@ produces identical logits to loading the whole model into RAM.
 androidllm/          package (numpy only)
   config.py          HF config.json -> canonical config
   engine.py          LayerStreamingEngine (AirLLM-style loop + prefetch)
-  models/llama.py    Llama/Qwen family forward pass
+  models/llama.py    Llama/Qwen family forward pass (+ optional rust path)
   neon.py            fp16 matmul: NEON lib or numpy fallback
   quant.py           block-wise 4/8-bit quant, pack, dequant
   safetensors.py     minimal safetensors reader/writer
@@ -115,7 +131,9 @@ androidllm/          package (numpy only)
   shard.py           HF model dir -> layer shards + manifest
   tokenizer.py       byte-level BPE + chat templates + HF convert
 src/androidllm_neon.c   ARM NEON fp16 kernel
-scripts/                setup_termux.sh, shard_model.sh, switch_model.sh, build_neon.sh
+androidllm_rs/          PyO3 Rust accelerator (layer_forward/head_logits/sample)
+scripts/                setup_termux.sh, shard_model.sh, switch_model.sh,
+                        build_neon.sh, build_rust.sh
 tests/                  roundtrip + equality tests
 ```
 

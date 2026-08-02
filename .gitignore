@@ -5,3 +5,5 @@ tests/tmp_tokenizer/
 tests/tmp_tokenizer_conv/
 libandroidllm_neon.so
 .venv/
+androidllm_rs/target/
+tests/tmp_gguf/

@@ -1,19 +1,181 @@
 import argparse
 import json
+import os
 import re
 import threading
 import time
 
 from .engine import LayerStreamingEngine
+from .json_grammar import JsonGrammar
+from .batching import BatchScheduler, SessionPool
+from . import neon
 
 
 def _parse_model_name(engine, name):
     return name or engine.manifest.get("name", "androidllm")
 
 
-def build_engine(model_dir):
-    return LayerStreamingEngine(model_dir)
+def _draft_dir():
+    """ANDROIDLLM_DRAFT = model dir or a model id under <ANDROIDLLM_DIR>/models."""
+    raw = os.environ.get("ANDROIDLLM_DRAFT", "").strip()
+    if not raw:
+        return None
+    if os.path.isdir(raw):
+        return raw
+    base = os.environ.get("ANDROIDLLM_DIR", os.path.expanduser("~/androidllm"))
+    cand = os.path.join(base, "models", raw)
+    return cand if os.path.isdir(cand) else None
 
+
+def build_engine(model_dir):
+    keep = int(os.environ.get("ANDROIDLLM_KEEP_LAYERS", "0"))
+    draft = _draft_dir()
+    spec_k = int(os.environ.get("ANDROIDLLM_SPEC_K", "0"))
+    engine = LayerStreamingEngine(model_dir, keep_layers=keep,
+                                  draft_dir=draft, spec_k=spec_k)
+    if engine.draft is None and spec_k > 0 and draft:
+        print("warning: draft model dir missing (%s) - running without "
+              "speculative decoding" % draft)
+    if keep > 0 or engine._lru > 0:
+        def warm():
+            try:
+                for i in range(min(keep, engine.n_layers)):
+                    engine.load_layer(i)
+            except Exception:
+                pass
+        threading.Thread(target=warm, daemon=True).start()
+    return engine
+
+
+# -- battery-aware speed policy -------------------------------------------
+
+_BATTERY_DIRS = (
+    "/sys/class/power_supply/battery",
+    "/sys/class/power_supply/BAT0",
+)
+
+
+def _sysfs(name):
+    for d in _BATTERY_DIRS:
+        try:
+            with open(os.path.join(d, name), encoding="utf-8") as f:
+                return f.read().strip()
+        except OSError:
+            continue
+    return None
+
+
+def battery_info():
+    status = _sysfs("status")
+    cap = _sysfs("capacity")
+    temp = _sysfs("temp")
+    return {
+        "charging": bool(status and status.lower().startswith(("charging", "full"))),
+        "capacity": int(cap) if cap and cap.isdigit() else None,
+        "temp_c": (int(temp) / 10.0) if temp and temp.isdigit() else None,
+    }
+
+
+def pick_threads(info, base):
+    """Charging -> base threads; battery under 50% -> half; low -> 1.
+    Hot battery caps too."""
+    n = base
+    if info["capacity"] is not None:
+        if info["capacity"] <= 15:
+            n = 1
+        elif info["capacity"] <= 50 and not info["charging"]:
+            n = max(1, base // 2)
+    if info["temp_c"] is not None and info["temp_c"] >= 45:
+        n = min(n, 2)
+    return n
+
+
+# Battery percent at which serving pauses entirely (0 disables).
+# Requests get a 503 while paused; charging or crossing the threshold
+# resumes automatically. Throttle kicks in well before the pause.
+_PAUSE_PCT = int(os.environ.get("ANDROIDLLM_BATTERY_PAUSE", "15"))
+
+
+def start_battery_policy(engine, interval=30):
+    def loop():
+        while True:
+            time.sleep(interval)
+            try:
+                info = battery_info()
+                charging = info["charging"]
+                cap = info["capacity"]
+                engine.paused = (_PAUSE_PCT > 0 and cap is not None
+                                 and cap <= _PAUSE_PCT and not charging)
+                if charging:
+                    engine.throttle_ms = 0
+                else:
+                    engine.throttle_ms = 20 if (cap is not None and cap <= 15) else 0
+                neon.set_threads(pick_threads(info, _BASE_THREADS))
+            except Exception:
+                pass
+    threading.Thread(target=loop, daemon=True).start()
+
+
+_BASE_THREADS = int(os.environ.get("ANDROIDLLM_THREADS", "4"))
+
+
+# -- reasoning-tag stripping ----------------------------------------------
+# Qwen3-style models emit <think>...</think> blocks. The chat API consumer
+# (the deck bot) wants the answer only; strip them unless disabled.
+
+_STRIP_THINK = os.environ.get("ANDROIDLLM_STRIP_THINK", "1") not in ("0", "false", "")
+
+
+def _think_strip(text):
+    if not _STRIP_THINK:
+        return text
+    out = re.sub(r"<think>.*?</think>", "", text, flags=re.S)
+    out = re.sub(r"\n{3,}", "\n\n", out)
+    return out.strip()
+
+
+class _ThinkStripper:
+    """Incremental <think>...</think> removal for SSE deltas.
+    Holds back the last 8 chars in case a tag is split across tokens."""
+
+    def __init__(self):
+        self.inside = False
+        self.buf = ""
+
+    def feed(self, text):
+        if not _STRIP_THINK:
+            return text
+        self.buf += text
+        if self.inside:
+            j = self.buf.find("</think>")
+            if j == -1:
+                k = min(len(self.buf), len("</think>"))
+                self.buf = self.buf[-k:] if k else ""
+                return ""
+            self.buf = self.buf[j + len("</think>"):]
+            self.inside = False
+            return self.feed("")
+        j = self.buf.find("<think>")
+        if j == -1:
+            k = min(len(self.buf), len("<think>"))
+            head, self.buf = self.buf[:-k], self.buf[-k:] if k else ""
+            return head
+        head, rest = self.buf[:j], self.buf[j + len("<think>"):]
+        self.buf = rest
+        self.inside = True
+        return head + self.feed("")
+
+    def flush(self):
+        """End of stream: emit any held-back tail (drops an unclosed tag)."""
+        if self.inside:
+            self.buf = ""
+            self.inside = False
+            return ""
+        out, self.buf = self.buf, ""
+        return out
+
+
+# -- request handling -----------------------------------------------------
 
 def _new_id(prefix):
     return "%s-%d" % (prefix, time.time_ns())
@@ -22,7 +184,8 @@ def _new_id(prefix):
 def _defaults(body):
     return (body.get("max_tokens", body.get("max_new_tokens", 64)),
             body.get("temperature", 0.8),
-            body.get("top_p", 0.9))
+            body.get("top_p", 0.9),
+            float(body.get("min_p", os.environ.get("ANDROIDLLM_MIN_P", "0.0"))))
 
 
 def _usage(prompt_ids, out_ids):
@@ -43,34 +206,11 @@ def _models_list(engine):
     }
 
 
-def _non_stream_response(engine, kind, body):
-    max_tokens, temperature, top_p = _defaults(body)
-    if kind == "chat":
-        ids = _chat_prompt_ids(engine, body.get("messages", []))
-        out_ids = engine.generate(ids, max_tokens, temperature, top_p,
-                                  stop_ids=engine.stop_ids)
-        text = engine.tokenizer.decode(out_ids)
-        return {
-            "id": _new_id("chatcmpl"),
-            "object": "chat.completion",
-            "created": int(time.time()),
-            "model": _parse_model_name(engine, body.get("model")),
-            "choices": [{"index": 0, "message": {"role": "assistant", "content": text},
-                         "finish_reason": "stop"}],
-            "usage": _usage(ids, out_ids),
-        }
-    ids = engine.tokenizer.encode(body.get("prompt", ""))
-    out_ids = engine.generate(ids, max_tokens, temperature, top_p,
-                              stop_ids=engine.stop_ids)
-    text = engine.tokenizer.decode(out_ids)
-    return {
-        "id": _new_id("cmpl"),
-        "object": "text_completion",
-        "created": int(time.time()),
-        "model": _parse_model_name(engine, body.get("model")),
-        "choices": [{"index": 0, "text": text, "finish_reason": "stop"}],
-        "usage": _usage(ids, out_ids),
-    }
+def _grammar(body):
+    g = body.get("grammar") or body.get("json_schema")
+    if not g:
+        return None
+    return JsonGrammar(g)
 
 
 def _stream_base(engine, kind, body):
@@ -81,45 +221,6 @@ def _stream_base(engine, kind, body):
                 "created": created, "model": name}
     return {"id": _new_id("cmpl"), "object": "text_completion",
             "created": created, "model": name}
-
-
-def _stream(handler, engine, kind, body):
-    """Write one SSE frame per generated token (delta-encoded) and a [DONE]."""
-    base = _stream_base(engine, kind, body)
-    generated = []
-    state = {"prev": "", "role": False}
-
-    def write(choice):
-        payload = dict(base)
-        payload["choices"] = [choice]
-        frame = b"data: " + json.dumps(payload, ensure_ascii=False).encode("utf-8") + b"\n\n"
-        handler.wfile.write(frame)
-        handler.wfile.flush()
-
-    def cb(tok):
-        generated.append(tok)
-        text = engine.tokenizer.decode(generated)
-        delta = text[len(state["prev"]):]
-        state["prev"] = text
-        if kind == "chat":
-            d = {"content": delta}
-            if not state["role"]:
-                d["role"] = "assistant"
-                state["role"] = True
-            write({"index": 0, "delta": d, "finish_reason": None})
-        else:
-            write({"index": 0, "text": delta, "finish_reason": None})
-
-    if kind == "chat":
-        ids = _chat_prompt_ids(engine, body.get("messages", []))
-    else:
-        ids = engine.tokenizer.encode(body.get("prompt", ""))
-    engine.generate(ids, *_defaults(body), stop_ids=engine.stop_ids, callback=cb)
-
-    if kind == "chat":
-        write({"index": 0, "delta": {}, "finish_reason": "stop"})
-    else:
-        write({"index": 0, "text": "", "finish_reason": "stop"})
 
 
 _ROUTES = [
@@ -133,7 +234,14 @@ _ROUTES = [
 def run_server(engine, host="127.0.0.1", port=8080):
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-    q_lock = threading.Lock()
+    scheduler = BatchScheduler(engine,
+                               max_slots=int(os.environ.get("ANDROIDLLM_BATCH_MAX", "4")))
+    pool = SessionPool(engine, max_pooled=4)
+    idle_since = time.time()
+    idle_pause = int(os.environ.get("ANDROIDLLM_IDLE_PAUSE", "0"))
+
+    def _finish(sess):
+        pool.put(sess)
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -161,51 +269,211 @@ def run_server(engine, host="127.0.0.1", port=8080):
             self.wfile.flush()
 
         def do_GET(self):
+            nonlocal idle_since
             if self.path == "/health":
+                idle_since = time.time()
                 self._reply(200, {"status": "ok"})
             elif self.path == "/v1/models":
+                idle_since = time.time()
                 self._reply(200, _models_list(engine))
+            elif self.path == "/stats":
+                info = battery_info()
+                snap = dict(engine.snapshot(), battery=info)
+                snap["strip_think"] = _STRIP_THINK
+                snap["pause_pct"] = _PAUSE_PCT
+                snap["batch"] = scheduler.snapshot()
+                snap["pooled"] = len(pool)
+                self._reply(200, snap)
             else:
                 self._reply(404, {"error": "not found"})
 
+        def _submit(self, body, kind, stream):
+            """Acquire a session (with KV prefix reuse), submit to the
+            scheduler, stream or return on completion."""
+            nonlocal idle_since
+            idle_since = time.time()
+            if kind == "chat":
+                ids = _chat_prompt_ids(engine, body.get("messages", []))
+            else:
+                ids = engine.tokenizer.encode(body.get("prompt", ""))
+            sess, pfx = pool.acquire(ids)
+            if pfx > 1:
+                engine.stats["prefix_calls"] += 1
+                engine.stats["prefix_tokens"] += pfx
+            max_tokens, temperature, top_p, min_p = _defaults(body)
+            sess.max_new_tokens = max_tokens
+            sess.temperature = temperature
+            sess.top_p = top_p
+            sess.min_p = min_p
+            sess.stop_ids = engine.stop_ids
+            sess.grammar = _grammar(body)
+            done = threading.Event()
+            outcome = {}
+
+            def on_done(s):
+                outcome["error"] = s.error
+                done.set()
+
+            if not scheduler.submit(sess, on_done):
+                pool.put(sess)
+                return None, "busy"
+            if not stream:
+                done.wait()
+                pool.put(sess)
+                return sess, None
+
+            # SSE: frames written from the scheduler thread; the handler
+            # thread just waits, then finalizes.
+            write_lock = threading.Lock()
+            base = _stream_base(engine, kind, body)
+            generated = []
+            state = {"prev": "", "role": False}
+            strip = _ThinkStripper()
+            final = {}
+
+            def emit(delta):
+                if not delta:
+                    return
+                if kind == "chat":
+                    d = {"content": delta}
+                    if not state["role"]:
+                        d["role"] = "assistant"
+                        state["role"] = True
+                    write({"index": 0, "delta": d, "finish_reason": None})
+                else:
+                    write({"index": 0, "text": delta, "finish_reason": None})
+
+            def write(choice):
+                payload = dict(base)
+                payload["choices"] = [choice]
+                frame = b"data: " + json.dumps(payload, ensure_ascii=False).encode("utf-8") + b"\n\n"
+                with write_lock:
+                    self.wfile.write(frame)
+                    self.wfile.flush()
+
+            def cb(tok):
+                generated.append(tok)
+                text = engine.tokenizer.decode(generated)
+                raw_delta = text[len(state["prev"]):]
+                state["prev"] = text
+                emit(strip.feed(raw_delta))
+
+            sess_step = sess.step
+            def step_wrapper():
+                finished, toks = sess_step()
+                for t in toks:
+                    cb(t)
+                return finished, toks
+            sess.step = step_wrapper
+            done.wait()
+            emit(strip.flush())
+            if kind == "chat":
+                write({"index": 0, "delta": {}, "finish_reason": "stop"})
+            else:
+                write({"index": 0, "text": "", "finish_reason": "stop"})
+            pool.put(sess)
+            return sess, None
+
         def do_POST(self):
+            nonlocal idle_since
             length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(length).decode("utf-8"))
             for pat, kind in _ROUTES:
                 if pat.match(self.path):
+                    if getattr(engine, "paused", False):
+                        info = battery_info()
+                        cap = info.get("capacity")
+                        self._reply(503, {"error": "battery low - serving paused",
+                                          "battery": info})
+                        return
                     if engine.tokenizer is None:
                         self._reply(500, {"error": "model has no tokenizer; "
                                                    "convert it with androidllm-shard"})
                         return
+                    stream = bool(body.get("stream"))
                     try:
-                        with q_lock:
-                            if body.get("stream"):
-                                self._begin_sse()
-                                try:
-                                    _stream(self, engine, kind, body)
-                                except Exception as exc:
-                                    self.wfile.write(
-                                        b"data: " + json.dumps({"error": str(exc)},
-                                                               ensure_ascii=False).encode("utf-8")
-                                        + b"\n\n")
-                                    self.wfile.flush()
-                                finally:
-                                    self._end_sse()
+                        if stream:
+                            self._begin_sse()
+                        sess, err = self._submit(body, kind, stream)
+                        if sess is None:
+                            if stream:
+                                self.wfile.write(
+                                    b"data: " + json.dumps(
+                                        {"error": "scheduler busy",
+                                         "batch": scheduler.snapshot()},
+                                        ensure_ascii=False).encode("utf-8") + b"\n\n")
+                                self.wfile.flush()
+                                self._end_sse()
                             else:
-                                self._reply(200, _non_stream_response(engine, kind, body))
+                                self._reply(503, {"error": "scheduler busy",
+                                                  "batch": scheduler.snapshot()})
+                            return
+                        if stream:
+                            self._end_sse()
+                            return
+                        if sess.error:
+                            self._reply(500, {"error": sess.error})
+                            return
+                        text = _think_strip(engine.tokenizer.decode(sess.generated))
+                        out_ids = sess.generated
+                        if kind == "chat":
+                            self._reply(200, {
+                                "id": _new_id("chatcmpl"),
+                                "object": "chat.completion",
+                                "created": int(time.time()),
+                                "model": _parse_model_name(engine, body.get("model")),
+                                "choices": [{"index": 0,
+                                             "message": {"role": "assistant",
+                                                         "content": text},
+                                             "finish_reason": "stop"}],
+                                "usage": _usage(
+                                    sess.prompt_ids[:sess.pos + 1], out_ids),
+                            })
+                        else:
+                            self._reply(200, {
+                                "id": _new_id("cmpl"),
+                                "object": "text_completion",
+                                "created": int(time.time()),
+                                "model": _parse_model_name(engine, body.get("model")),
+                                "choices": [{"index": 0, "text": text,
+                                             "finish_reason": "stop"}],
+                                "usage": _usage(
+                                    sess.prompt_ids[:sess.pos + 1], out_ids),
+                            })
                     except Exception as exc:
-                        self._reply(500, {"error": str(exc)})
+                        if stream:
+                            self.wfile.write(
+                                b"data: " + json.dumps({"error": str(exc)},
+                                                       ensure_ascii=False).encode("utf-8")
+                                + b"\n\n")
+                            self.wfile.flush()
+                            self._end_sse()
+                        else:
+                            self._reply(500, {"error": str(exc)})
                     return
             self._reply(404, {"error": "not found"})
 
     httpd = ThreadingHTTPServer((host, port), Handler)
     print("androidllm serving on http://%s:%d" % (host, port))
+
+    def idle_watch():
+        while True:
+            time.sleep(30)
+            if idle_pause > 0 and time.time() - idle_since > idle_pause:
+                print("idle for %ds - pausing serve (runner will restart on demand)"
+                      % idle_pause)
+                os._exit(0)
+
+    threading.Thread(target=idle_watch, daemon=True).start()
+    start_battery_policy(engine)
+
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
         httpd.server_close()
+        scheduler.close()
 
 
 def main():
