@@ -6,6 +6,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-08-02
+
+### Added
+- Model catalog now covers 5-16 GB RAM devices: Qwen2.5-3B, Qwen3-4B,
+  Qwen2.5-7B, Mistral-7B-v0.3, Qwen3-8B, Qwen3-14B, Qwen2.5-14B,
+  Mistral-Small-24B, Qwen2.5-32B, Qwen3-32B (auto-gated per device RAM/disk).
+
 ## [0.2.0] - 2026-08-02
 
 ### Added
