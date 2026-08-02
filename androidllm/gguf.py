@@ -50,7 +50,9 @@ def _pad_to(n, align=GGUF_ALIGNMENT):
 class GGUFReader:
     def __init__(self, path):
         self.path = path
-        self.f = open(path, "rb")
+        # file handle kept open for the reader's lifetime: tensors are read
+        # on demand via seek() in _raw(); use `with GGUFReader(...)` to close.
+        self.f = open(path, "rb")  # noqa: SIM115
         magic = self.f.read(4)
         if magic != GGUF_MAGIC:
             raise ValueError(f"not a GGUF file: {path}")
@@ -76,6 +78,12 @@ class GGUFReader:
 
     def close(self):
         self.f.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.close()
 
     def _read_string(self):
         n = struct.unpack("<Q", self.f.read(8))[0]
@@ -110,7 +118,7 @@ class GGUFReader:
 
     def _raw(self, name):
         info = self.tensors[name]
-        nbytes = int(np.prod(info["dims"])) * 4  # upper bound (f32)
+        int(np.prod(info["dims"])) * 4  # upper bound (f32)
         self.f.seek(self.data_start + info["offset"])
         t = info["type"]
         kind = GGML_T.get(t)
@@ -239,7 +247,8 @@ def canon_from_meta(meta):
         raise ValueError(f"unsupported GGUF architecture: {arch!r} "
                          f"(supported: {', '.join(sorted(_SUPPORTED_ARCH))})")
     n = arch if arch in ("qwen2", "qwen3") else "llama"
-    get = lambda key, default=0: meta.get(f"{arch}.{key}", default)
+    def get(key, default=0):
+        return meta.get(f"{arch}.{key}", default)
     hidden = int(get("embedding_length"))
     heads = int(get("attention.head_count"))
     kv_heads = int(get("attention.head_count_kv", heads) or heads)

@@ -209,7 +209,7 @@ class JsonGrammar:
                 if t not in ("any", "object"):
                     return False
                 sub = node if isinstance(node, dict) else {}
-                props = sub.get("properties") or {} if t == "object" else {}
+                sub.get("properties") or {} if t == "object" else {}
                 m["stack"].append({"kind": "obj", "node": sub, "st": "key",
                                    "key": None, "seen": set(),
                                    "required": set(sub.get("required") or []),
@@ -384,7 +384,4 @@ class JsonGrammar:
         return self._mask_structural(m, flags)
 
     def _token_ok(self, m, text):
-        for ch in text:
-            if not self._consume(m, ch):
-                return False
-        return True
+        return all(self._consume(m, ch) for ch in text)

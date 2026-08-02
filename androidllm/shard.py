@@ -2,7 +2,6 @@ import argparse
 import glob
 import json
 import os
-import sys
 
 import numpy as np
 
@@ -83,7 +82,7 @@ def shard_from_tensors(source_tensors, canon, out, attn_bits=4, mlp_bits=8,
     global_tensors = {}
     layer_tensors = {}
 
-    for name, (kind, key, arr) in layout.items():
+    for _name, (kind, key, arr) in layout.items():
         w = arr() if callable(arr) else arr
         w = np.ascontiguousarray(w, dtype=np.float32)
         if kind == "global":
@@ -108,14 +107,15 @@ def shard_from_tensors(source_tensors, canon, out, attn_bits=4, mlp_bits=8,
             bucket.setdefault("norms", {})[key[1]] = w.astype(np.float16)
             continue
         bits = attn_bits if kind == "attn" else mlp_bits
-        q, scale = quantize_matrix(w, bits=bits, block=block)
+        q_raw, scale = quantize_matrix(w, bits=bits, block=block)
         base = key[1].split("_")[0]
-        bucket.setdefault("weights", {})[_quant_name(base)] = (pack_int4(q) if bits == 4 else q.astype(np.int8))
+        q = pack_int4(q_raw) if bits == 4 else q_raw.astype(np.int8)
+        bucket.setdefault("weights", {})[_quant_name(base)] = q
         bucket["weights"][_scale_name(base)] = scale.astype(np.float16)
         quant_meta.setdefault(str(layer), {})
         quant_meta[str(layer)][base] = {
-            "bits": bits, "block": block, "out": int(q.shape[0]),
-            "in": int(q.shape[1]), "in_real": int(w.shape[1]),
+            "bits": bits, "block": block, "out": int(q_raw.shape[0]),
+            "in": int(q_raw.shape[1]), "in_real": int(w.shape[1]),
             "packed": "U8" if bits == 4 else "I8",
         }
         del q, scale, w

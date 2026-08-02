@@ -21,7 +21,7 @@ import json
 import sys
 import time
 
-from .devicespec import device_specs, specs_from_text, describe
+from .devicespec import describe, device_specs, specs_from_text
 
 # curated llama-arch chat-tuned models
 # dl_gb = bf16 safetensors download, shard_gb = Q4 layer shards,
@@ -82,10 +82,9 @@ def score(model, specs, est_speed=None):
     if available <= 0.1:
         return None, "RAM unknown or too low"
     if resident > available:
-        return None, "%.2f GB resident > %.1f GB available RAM" % (resident, available)
+        return None, f"{resident:.2f} GB resident > {available:.1f} GB available RAM"
     if need_dl > max(disk * 0.9, 0.5):
-        return None, "%.1f GB download needs %.1f GB free (have %.1f)" % (
-            need_dl, need_dl, disk)
+        return None, f"{need_dl:.1f} GB download needs {need_dl:.1f} GB free (have {disk:.1f})"
     speed = est_speed(params_b) if est_speed else _est_speed(params_b)
     sp = min(1.0, speed / 1.2)
     sm = _smart(params_b, model.get("thinking", False))
@@ -148,8 +147,8 @@ def search_hf(query, limit=12, min_downloads=1000, specs=None):
     device via fit heuristics (bf16 download ~ params*2.05 GB)."""
     import re
     specs = specs or device_specs()
-    url = ("%s?search=%s&sort=downloads&direction=-1&limit=%d"
-           % (_HF_API, urllib_quote(query), limit))
+    url = (f"{_HF_API}?search={urllib_quote(query)}&sort=downloads&direction=-1&limit={limit}"
+           )
     try:
         rows = _hf_json(url)
     except Exception as e:

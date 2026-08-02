@@ -10,9 +10,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from androidllm.engine import LayerStreamingEngine
 from androidllm.json_grammar import JsonGrammar
-from androidllm.quant import quantize_matrix, pack_int4, dequantize_packed
+from androidllm.quant import dequantize_packed, quantize_matrix
 from androidllm.safetensors import read_tensor, write_safetensors
-from test_streaming import TMP, CANON, build
+
+from test_streaming import TMP, build
 
 
 class FakeTok:
@@ -37,7 +38,7 @@ def test_embed_quant_roundtrip():
         "bits": 8, "block": w.shape[1], "out": w.shape[0], "in": w.shape[1]})
     err = np.max(np.abs(w.astype(np.float16) - deq))
     assert err < 0.01, err
-    print("embed quant roundtrip OK (max err %.4f)" % err)
+    print(f"embed quant roundtrip OK (max err {err:.4f})")
 
 
 def test_engine_embed_quant_path():
@@ -58,7 +59,7 @@ def test_engine_embed_quant_path():
     e = LayerStreamingEngine(TMP)
     diff = np.max(np.abs(e.model.embed.astype(np.float32) - embed.astype(np.float32)))
     assert diff < 0.01, diff
-    print("engine embed-quant path OK (max diff %.4f)" % diff)
+    print(f"engine embed-quant path OK (max diff {diff:.4f})")
     # restore for other tests
     write_safetensors(embed_path, {"embed": embed})
     with open(os.path.join(TMP, "manifest.json"), encoding="utf-8") as f:
@@ -100,7 +101,7 @@ def test_prefix_kv_reuse():
     assert snap["context_used"] == len([3, 7, 11, 5, 9]) + 2 - 1, snap["context_used"]
     assert 0 < snap["context_pct"] <= 100, snap["context_pct"]
     assert "prefix_calls" in snap and "paused" in snap
-    print("prefix KV reuse OK (calls=%d tokens=%d ctx=%d)" % (
+    print("prefix KV reuse OK (calls={} tokens={} ctx={})".format(
         e.stats["prefix_calls"], e.stats["prefix_tokens"], snap["context_used"]))
 
 
@@ -113,7 +114,8 @@ def test_lru_cache():
     assert 0 in keys, keys
     assert len(keys) <= 2, keys
     assert e.stats["cache_hits"] > 0
-    print("LRU+pinned cache OK (keys=%s hits=%d)" % (keys, e.stats["cache_hits"]))
+    print("LRU+pinned cache OK (keys={} hits={})".format(
+        keys, e.stats["cache_hits"]))
 
 
 def _mask_for(schema, buf, tok):
@@ -168,7 +170,7 @@ def test_grammar_end_to_end_object():
     for want in ('{', '"', 'a', '"', ':', 't', 'r', 'u', 'e', '}'):
         m = g.allowed_mask(buf, tok)
         idx = pieces.index(want)
-        assert m[idx], "token %r not allowed at buf=%r" % (want, buf)
+        assert m[idx], f"token {want!r} not allowed at buf={buf!r}"
         buf += want
     m = g.allowed_mask(buf, tok)
     assert not any(m[pieces.index(p)] for p in (',', '"'))

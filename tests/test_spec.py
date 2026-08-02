@@ -8,7 +8,6 @@ layer iterator (asserted via compute_tokens accounting).
 import os
 
 import pytest
-
 from androidllm.engine import LayerStreamingEngine
 
 MODEL = os.path.join(os.path.dirname(__file__), "tmp_model")
@@ -19,6 +18,13 @@ def _prefix_off():
     os.environ["ANDROIDLLM_PREFIX_KV"] = "0"
     yield
     os.environ.pop("ANDROIDLLM_PREFIX_KV", None)
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _toy_model():
+    from test_streaming import build
+    build()
+    yield
 
 
 def _engine(**kw):

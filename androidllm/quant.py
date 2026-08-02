@@ -60,9 +60,6 @@ def dequantize_packed(packed, scale, meta):
     block = meta["block"]
     out = meta["out"]
     inp = meta["in"]
-    if bits == 4:
-        q = unpack_int4(packed, out, inp)
-    else:
-        q = packed.astype(np.float32)
+    q = unpack_int4(packed, out, inp) if bits == 4 else packed.astype(np.float32)
     s = np.repeat(np.asarray(scale, dtype=np.float32), block, axis=1)
     return (q * s).astype(np.float16)

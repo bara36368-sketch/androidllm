@@ -26,8 +26,8 @@ def load_config(config_path):
         cfg = json.load(f)
     if cfg.get("model_type") not in _FAMILY_ALIASES:
         raise ValueError(
-            "unsupported model_type %s (supported: llama, qwen2, qwen3, smollm2, mistral, phi3)"
-            % cfg.get("model_type")
+            "unsupported model_type {} (supported: llama, qwen2, qwen3, "
+            "smollm2, mistral, phi3)".format(cfg.get("model_type"))
         )
     hidden = cfg.get("hidden_size") or cfg.get("d_model")
     heads = cfg.get("num_attention_heads") or cfg.get("n_head")

@@ -6,10 +6,10 @@ import secrets
 import threading
 import time
 
+from . import neon
+from .batching import BatchScheduler, SessionPool
 from .engine import LayerStreamingEngine
 from .json_grammar import JsonGrammar
-from .batching import BatchScheduler, SessionPool
-from . import neon
 
 
 def _api_key_path():
@@ -84,8 +84,8 @@ def build_engine(model_dir):
     engine = LayerStreamingEngine(model_dir, keep_layers=keep,
                                   draft_dir=draft, spec_k=spec_k)
     if engine.draft is None and spec_k > 0 and draft:
-        print("warning: draft model dir missing (%s) - running without "
-              "speculative decoding" % draft)
+        print(f"warning: draft model dir missing ({draft}) - running without "
+              "speculative decoding")
     if keep > 0 or engine._lru > 0:
         def warm():
             try:
@@ -228,7 +228,7 @@ class _ThinkStripper:
 # -- request handling -----------------------------------------------------
 
 def _new_id(prefix):
-    return "%s-%d" % (prefix, time.time_ns())
+    return f"{prefix}-{time.time_ns()}"
 
 
 def _defaults(body):
@@ -286,8 +286,8 @@ def run_server(engine, host="127.0.0.1", port=8080):
 
     api_key, key_generated = _load_api_key()
     if api_key and key_generated:
-        print(">> generated new API key: %s" % api_key)
-        print(">> saved to %s (reuse it as ANDROIDLLM_API_KEY)" % _api_key_path())
+        print(f">> generated new API key: {api_key}")
+        print(f">> saved to {_api_key_path()} (reuse it as ANDROIDLLM_API_KEY)")
     elif api_key:
         print(">> API key auth enabled (ANDROIDLLM_API_KEY)")
 
@@ -338,7 +338,7 @@ def run_server(engine, host="127.0.0.1", port=8080):
                     self._reply(200, _models_list(engine))
                 elif self.path == "/v1/keys":
                     self._reply(200, {"api_key": api_key,
-                                      "base_url": "http://%s:%d/v1" % (host, port)})
+                                      "base_url": f"http://{host}:{port}/v1"})
                 else:
                     info = battery_info()
                     snap = dict(engine.snapshot(), battery=info)
@@ -392,7 +392,6 @@ def run_server(engine, host="127.0.0.1", port=8080):
             generated = []
             state = {"prev": "", "role": False}
             strip = _ThinkStripper()
-            final = {}
 
             def emit(delta):
                 if not delta:
@@ -409,7 +408,8 @@ def run_server(engine, host="127.0.0.1", port=8080):
             def write(choice):
                 payload = dict(base)
                 payload["choices"] = [choice]
-                frame = b"data: " + json.dumps(payload, ensure_ascii=False).encode("utf-8") + b"\n\n"
+                data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+                frame = b"data: " + data + b"\n\n"
                 with write_lock:
                     self.wfile.write(frame)
                     self.wfile.flush()
@@ -447,7 +447,7 @@ def run_server(engine, host="127.0.0.1", port=8080):
                 if pat.match(self.path):
                     if getattr(engine, "paused", False):
                         info = battery_info()
-                        cap = info.get("capacity")
+                        info.get("capacity")
                         self._reply(503, {"error": "battery low - serving paused",
                                           "battery": info})
                         return
@@ -519,14 +519,14 @@ def run_server(engine, host="127.0.0.1", port=8080):
             self._reply(404, {"error": "not found"})
 
     httpd = ThreadingHTTPServer((host, port), Handler)
-    print("androidllm serving on http://%s:%d" % (host, port))
+    print(f"androidllm serving on http://{host}:{port}")
 
     def idle_watch():
         while True:
             time.sleep(30)
             if idle_pause > 0 and time.time() - idle_since > idle_pause:
-                print("idle for %ds - pausing serve (runner will restart on demand)"
-                      % idle_pause)
+                print(f"idle for {idle_pause}s - pausing serve "
+                      "(runner will restart on demand)")
                 os._exit(0)
 
     threading.Thread(target=idle_watch, daemon=True).start()

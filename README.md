@@ -1,5 +1,9 @@
 # androidllm
 
+[![CI](https://github.com/bara36368-sketch/androidllm/actions/workflows/ci.yml/badge.svg)](https://github.com/bara36368-sketch/androidllm/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.9%2B-blue.svg)](pyproject.toml)
+
 Layer-streaming LLM inference for Android/Termux, modeled on
 [AirLLM](https://github.com/lyogavin/airllm) but with **zero PyTorch**:
 pure Python + numpy, with an optional ARM NEON fp16 matmul kernel.

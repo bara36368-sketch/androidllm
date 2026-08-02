@@ -1,5 +1,4 @@
 import json
-import os
 import struct
 
 import numpy as np
@@ -37,7 +36,7 @@ def write_safetensors(path, tensors):
     with open(path, "wb") as f:
         f.write(struct.pack("<Q", len(raw)))
         f.write(raw)
-        for name, arr in tensors.items():
+        for _name, arr in tensors.items():
             arr = np.ascontiguousarray(arr)
             f.write(arr.tobytes())
             f.write(b"\x00" * _pad(arr.nbytes))

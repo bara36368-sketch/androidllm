@@ -1,0 +1,39 @@
+# Changelog
+
+All notable changes to this project are documented here.
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+## [0.2.0] - 2026-08-02
+
+### Added
+- Bearer API key auth on all `/v1/*` routes and `/stats` (`--api-key` flag or
+  `ANDROIDLLM_API_KEY`); a random key is generated and persisted to
+  `~/.androidllm/api_key` on first run.
+- `GET /v1/keys` endpoint returning the active API key and base URL.
+- `py.typed` marker for type checkers.
+- GitHub Actions CI: ruff lint, pytest on Python 3.9/3.11/3.13, wheel build.
+- `CONTRIBUTING.md` with project design rules.
+
+### Changed
+- README gains an API key auth section and quickstart curl example.
+- Project metadata modernized in `pyproject.toml` (SPDX license, classifiers,
+  URLs, ruff/pytest config, `dev` extra).
+
+## [0.1.0] - 2026-07-19
+
+### Added
+- Layer-streaming Llama/Qwen inference engine (AirLLM-style), zero PyTorch.
+- Block-wise 4/8-bit weight quantization (`androidllm/quant.py`).
+- Safetensors reader/writer, HF tokenizer conversion (byte-level BPE + Jinja
+  subset chat templates).
+- OpenAI-compatible HTTP server (`androidllm-serve`) with SSE streaming.
+- Model sharding CLI (`androidllm-shard`) with optional `huggingface_hub`.
+- ARM NEON fp16 matmul kernel (`src/androidllm_neon.c`) with numpy fallback.
+- PyO3 Rust accelerator (`androidllm_rs`): fused layer forward, head logits,
+  and sampling; bit-equal to the numpy path.
+- GGUF reader + conversion to shards.
+- Speculative decoding, batching scheduler, JSON grammar constrained decoding.
+- Termux setup and model-management scripts (`scripts/`).

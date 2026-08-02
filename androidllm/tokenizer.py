@@ -169,9 +169,11 @@ def _value_of(expr, env):
     m = _EXPR_SPLIT.match(expr)
     if m:
         expr = m.group(1)
-    if expr.startswith("'") and expr.endswith("'") and len(expr) > 1:
-        v = expr[1:-1]
-    elif expr.startswith('"') and expr.endswith('"') and len(expr) > 1:
+    quoted = (
+        (expr.startswith("'") and expr.endswith("'"))
+        or (expr.startswith('"') and expr.endswith('"'))
+    ) and len(expr) > 1
+    if quoted:
         v = expr[1:-1]
     else:
         try:
@@ -291,7 +293,9 @@ def _eval_nodes(nodes, env, out):
                 if v is None:
                     parts = None
                     break
-                parts.append(str(v) if not isinstance(v, (dict, list)) else json.dumps(v, ensure_ascii=False, separators=(",", ":")))
+                if isinstance(v, (dict, list)):
+                    v = json.dumps(v, ensure_ascii=False, separators=(",", ":"))
+                parts.append(str(v))
             if parts is not None:
                 out.append("".join(parts))
         elif kind == "if":

@@ -32,10 +32,29 @@ CANON = {
 }
 
 
+def _write_toy_tokenizer():
+    """Byte-symbol vocab (like the HF converter emits): one unicode char per
+    byte so ByteLevelBPE round-trips and grammar masking sees real chars."""
+    from androidllm.tokenizer import _bytes_to_unicode
+    vocab_size = CANON["vocab"]
+    mapping = _bytes_to_unicode()
+    chars = ["", "<s>", "</s>", "<unk>"] + [mapping[b] for b in range(256)]
+    vocab = chars[:vocab_size]
+    with open(os.path.join(TMP, "vocab.txt"), "w", encoding="utf-8") as f:
+        f.write("\n".join(vocab) + "\n")
+    with open(os.path.join(TMP, "merges.txt"), "w", encoding="utf-8") as f:
+        pass
+    with open(os.path.join(TMP, "special_tokens.json"), "w", encoding="utf-8") as f:
+        json.dump({"<s>": 1, "</s>": 2, "<unk>": 3}, f)
+    with open(os.path.join(TMP, "template.txt"), "w", encoding="utf-8") as f:
+        f.write("{{messages}}")
+
+
 def build():
     os.makedirs(TMP, exist_ok=True)
     rng = np.random.default_rng(7)
     canon = CANON
+    _write_toy_tokenizer()
     embed = (rng.standard_normal((canon["vocab"], canon["hidden"])) * 0.02).astype(np.float16)
     final_norm = rng.standard_normal(canon["hidden"]).astype(np.float16)
     write_safetensors(os.path.join(TMP, "embeddings.safetensors"), {"embed": embed})
@@ -57,9 +76,11 @@ def build():
             tensors[base + ".scale"] = scale.astype(np.float16)
             meta_layer[base] = {"bits": 4, "block": 32, "out": outdim,
                                 "in": indim, "packed": "U8"}
-        tensors["input_layernorm.weight"] = rng.standard_normal(canon["hidden"]).astype(np.float16)
-        tensors["post_attention_layernorm.weight"] = rng.standard_normal(canon["hidden"]).astype(np.float16)
-        write_safetensors(os.path.join(TMP, "layer_%d.safetensors" % i), tensors)
+        tensors["input_layernorm.weight"] = (
+            rng.standard_normal(canon["hidden"]).astype(np.float16))
+        tensors["post_attention_layernorm.weight"] = (
+            rng.standard_normal(canon["hidden"]).astype(np.float16))
+        write_safetensors(os.path.join(TMP, f"layer_{i}.safetensors"), tensors)
         quant_meta[str(i)] = meta_layer
     manifest = {
         "format": "androidllm/v1",
@@ -82,7 +103,7 @@ def load_all():
         meta = json.load(f)["quant"]["layers"]
     layers = []
     for i in range(canon["layers"]):
-        path = os.path.join(TMP, "layer_%d.safetensors" % i)
+        path = os.path.join(TMP, f"layer_{i}.safetensors")
         header, _, _ = read_header(path)
         layer = {}
         for base, qm in meta[str(i)].items():
@@ -100,8 +121,8 @@ def run_reference(prompt):
     kv = model.prepare_kv(CANON["max_len"])
     x = model.embed[prompt[0]].reshape(1, -1)
     for pos in range(len(prompt)):
-        for l in range(CANON["layers"]):
-            x = model.layer_forward(x, layers[l], kv[l], pos)
+        for li in range(CANON["layers"]):
+            x = model.layer_forward(x, layers[li], kv[li], pos)
     return model.logits(x)
 
 
@@ -111,11 +132,11 @@ def run_streaming(prompt):
     x = engine.model.embed[prompt[0]].reshape(1, -1)
     for pos in range(len(prompt)):
         pending = engine._pool.submit(engine.load_layer, 0)
-        for l in range(engine.n_layers):
+        for li in range(engine.n_layers):
             layer = pending.result()
-            pending = (engine._pool.submit(engine.load_layer, l + 1)
-                       if l + 1 < engine.n_layers else None)
-            x = engine.model.layer_forward(x, layer, kv[l], pos)
+            pending = (engine._pool.submit(engine.load_layer, li + 1)
+                       if li + 1 < engine.n_layers else None)
+            x = engine.model.layer_forward(x, layer, kv[li], pos)
     return engine.model.logits(x)
 
 
@@ -126,7 +147,7 @@ def test_streaming_equals_loaded():
     got = run_streaming(prompt)
     assert ref.shape == got.shape
     err = np.max(np.abs(ref - got)) / max(1e-6, np.max(np.abs(ref)))
-    assert err < 1e-3, "max diff %g" % err
+    assert err < 1e-3, f"max diff {err:g}"
     print("streaming == all-layers-loaded OK")
 
 

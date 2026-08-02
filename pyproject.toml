@@ -1,19 +1,43 @@
 [build-system]
-requires = ["setuptools>=61"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "androidllm"
-version = "0.1.0"
+version = "0.2.0"
 description = "AirLLM-style layer-streaming LLM inference for Android/Termux. No torch. Pure numpy + optional ARM NEON kernel."
 readme = "README.md"
 requires-python = ">=3.9"
-license = {text = "MIT"}
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{name = "androidllm contributors"}]
+keywords = ["llm", "inference", "android", "termux", "numpy", "airllm", "streaming"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Operating System :: Android",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = ["numpy>=1.24"]
+
+[project.urls]
+Homepage = "https://github.com/bara36368-sketch/androidllm"
+Repository = "https://github.com/bara36368-sketch/androidllm"
+Issues = "https://github.com/bara36368-sketch/androidllm/issues"
+Changelog = "https://github.com/bara36368-sketch/androidllm/blob/master/CHANGELOG.md"
 
 [project.optional-dependencies]
 hub = ["huggingface_hub>=0.23"]
+dev = ["pytest>=7", "ruff>=0.6"]
 
 [project.scripts]
 androidllm-shard = "androidllm.shard:main"
@@ -21,3 +45,18 @@ androidllm-serve = "androidllm.serve:main"
 
 [tool.setuptools]
 packages = ["androidllm", "androidllm.models"]
+
+[tool.setuptools.package-data]
+androidllm = ["py.typed"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+src = ["androidllm", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

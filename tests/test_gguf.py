@@ -131,7 +131,7 @@ def _write_gguf(path, tensors):
         pad = (32 - f.tell() % 32) % 32
         f.write(b"\x00" * pad)
         data_base = f.tell()
-        for name, arr, dtype, off in infos:
+        for _name, arr, dtype, off in infos:
             assert data_base + off == f.tell()
             if dtype == "F16":
                 f.write(np.ascontiguousarray(arr, dtype=np.float16).tobytes())
@@ -188,7 +188,7 @@ def write_hf_dir(tensors, out_dir):
             tensors[base + "attn_norm.weight"][1].astype(np.float32))
         layer[f"model.layers.{i}.post_attention_layernorm.weight"] = (
             tensors[base + "ffn_norm.weight"][1].astype(np.float32))
-        for proj, gg, hfn in (("attn_q", "attn_q", "self_attn.q_proj.weight"),
+        for _proj, gg, hfn in (("attn_q", "attn_q", "self_attn.q_proj.weight"),
                               ("attn_k", "attn_k", "self_attn.k_proj.weight"),
                               ("attn_v", "attn_v", "self_attn.v_proj.weight"),
                               ("attn_output", "attn_output", "self_attn.o_proj.weight"),
@@ -228,13 +228,14 @@ def test_q8_dequant():
 
 
 def test_convert_matches_hf():
+    os.makedirs(TMP, exist_ok=True)
     tensors = build_tensors()
     _write_gguf(os.path.join(TMP, "toy.gguf"), tensors)
     write_hf_dir(tensors, HF)
     os.makedirs(GG, exist_ok=True)
     man_gg = convert_gguf(os.path.join(TMP, "toy.gguf"), GG, attn_bits=4,
                           mlp_bits=8, block=32, embed_bits=0)
-    man_hf = shard_model(HF, os.path.join(TMP, "hf_out"), attn_bits=4,
+    shard_model(HF, os.path.join(TMP, "hf_out"), attn_bits=4,
                          mlp_bits=8, block=32, embed_bits=0)
     assert man_gg["config"]["layers"] == 2
     assert man_gg["config"]["hidden"] == 64
@@ -243,7 +244,8 @@ def test_convert_matches_hf():
     assert man_gg["tied"] is False
     assert os.path.exists(os.path.join(GG, "vocab.txt"))
     assert os.path.exists(os.path.join(GG, "template.txt"))
-    assert "<|im_start|>" in open(os.path.join(GG, "vocab.txt"), encoding="utf-8").read()
+    with open(os.path.join(GG, "vocab.txt"), encoding="utf-8") as f:
+        assert "<|im_start|>" in f.read()
     for fname in ("embeddings.safetensors", "norms.safetensors",
                   "lm_head.safetensors", "layer_0.safetensors", "layer_1.safetensors"):
         for d in (GG, os.path.join(TMP, "hf_out")):
@@ -272,9 +274,9 @@ def test_convert_matches_hf():
     e = LayerStreamingEngine(GG)
     out = e.generate([3, 7, 11], max_new_tokens=4)
     assert len(out) == 4 and all(0 <= t < 64 for t in out)
-    print("GGUF convert == HF shard OK (layers=%d vocab=%d kv_heads=%d)"
-          % (man_gg["config"]["layers"], man_gg["config"]["vocab"],
-             man_gg["config"]["kv_heads"]))
+    print("GGUF convert == HF shard OK (layers={} vocab={} kv_heads={})".format(
+        man_gg["config"]["layers"], man_gg["config"]["vocab"],
+        man_gg["config"]["kv_heads"]))
 
 
 if __name__ == "__main__":

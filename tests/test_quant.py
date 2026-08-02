@@ -5,7 +5,13 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from androidllm.quant import pack_int4, unpack_int4, quantize_matrix, dequantize_packed, dequantize_matrix
+from androidllm.quant import (
+    dequantize_matrix,
+    dequantize_packed,
+    pack_int4,
+    quantize_matrix,
+    unpack_int4,
+)
 
 
 def test_quant_roundtrip():

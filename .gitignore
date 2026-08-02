@@ -1,9 +1,46 @@
+# Byte-compiled / optimized / DLL files
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+wheelhouse/
+.pip-wheel-metadata/
+
+# Rust (PyO3) artifacts
+androidllm_rs/target/
+androidllm_rs/Cargo.lock
+
+# Native extension build output
+libandroidllm_neon.so
+*.o
+*.so
+
+# Test artifacts
 tests/tmp_model/
 tests/tmp_tokenizer/
 tests/tmp_tokenizer_conv/
-libandroidllm_neon.so
-.venv/
-androidllm_rs/target/
 tests/tmp_gguf/
+.pytest_cache/
+
+# Local model / runtime state
+models/
+current_model.json
+api_key
+
+# Editors / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db

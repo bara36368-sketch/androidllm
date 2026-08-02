@@ -13,6 +13,7 @@ Env knobs:
   ANDROIDLLM_BATCH_MAX   max concurrent slots (default 4)
   ANDROIDLLM_BATCH_MEM_MB  KV budget for all slots+pool (default 700)
 """
+import contextlib
 import os
 import threading
 import time
@@ -252,10 +253,8 @@ class BatchScheduler:
             self.stats["stepped"] += 1
             if finished:
                 self.stats["completed"] += 1
-                try:
+                with contextlib.suppress(Exception):
                     done_cb(sess)
-                except Exception:
-                    pass
             else:
                 with self._cond:
                     self._active.append(slot)

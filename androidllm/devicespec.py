@@ -36,9 +36,8 @@ def cpu_info():
     for line in _read_lines("/proc/cpuinfo"):
         if line.startswith("processor"):
             cores += 1
-        elif line.startswith("model name") and model is None:
-            model = line.split(":", 1)[1].strip()
-        elif line.startswith("Hardware") and model is None:
+        elif model is None and (
+                line.startswith("model name") or line.startswith("Hardware")):
             model = line.split(":", 1)[1].strip()
     return (cores or None), model
 
@@ -155,9 +154,9 @@ def describe(specs):
     if specs.get("device"):
         bits.append(specs["device"])
     if specs.get("ram_gb"):
-        bits.append("%s GB RAM" % specs["ram_gb"])
+        bits.append("{} GB RAM".format(specs["ram_gb"]))
     if specs.get("cores"):
-        bits.append("%d cores" % specs["cores"])
+        bits.append(f"{specs['cores']} cores")
     if specs.get("cpu"):
         bits.append(specs["cpu"])
     bits.append("%s GB free" % (specs.get("disk_free_gb") or 0))

@@ -1,3 +1,4 @@
+import contextlib
 import gc
 import json
 import os
@@ -8,9 +9,9 @@ from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
+from .models.llama import LlamaModel
 from .quant import dequantize_packed
 from .safetensors import read_header, read_tensor
-from .models.llama import LlamaModel
 
 # Optional Rust acceleration for sampling
 try:
@@ -157,7 +158,7 @@ class LayerStreamingEngine:
         return tuple(stops)
 
     def _load_layer_raw(self, i):
-        path = os.path.join(self.model_dir, "layer_%d.safetensors" % i)
+        path = os.path.join(self.model_dir, f"layer_{i}.safetensors")
         header, _, _ = read_header(path)
         layer = {}
         for base, qm in self.layer_meta.get(str(i), {}).items():
@@ -235,10 +236,8 @@ class LayerStreamingEngine:
 
     def close(self):
         """Stop prefetch threads and release the draft engine."""
-        try:
+        with contextlib.suppress(Exception):
             self._pool.shutdown(wait=False)
-        except Exception:
-            pass
         if self.draft is not None:
             self.draft.close()
             self.draft = None
@@ -256,10 +255,10 @@ class LayerStreamingEngine:
     def _forward(self, x, kv, pos):
         """One full layer pass at position pos, writing into kv[pos].
         A fresh layer iterator is created per pass (layers are finite)."""
-        for l, layer in self._layers():
+        for li, layer in self._layers():
             if layer is not None:
                 t0 = time.time()
-                x = self.model.layer_forward(x, layer, kv[l], pos)
+                x = self.model.layer_forward(x, layer, kv[li], pos)
                 self.stats["compute_ms"] += (time.time() - t0) * 1000
                 self.stats["compute_tokens"] += 1
         return x
