@@ -234,16 +234,87 @@ def _emit(obj):
     sys.stdout.write(json.dumps(obj, ensure_ascii=False) + "\n")
 
 
+def _tier_bounds(tier):
+    """Parse a RAM-tier filter like '4-8' (fits 4-8 GB) or '8' (8+ GB).
+    Returns (lo, hi) in GB with hi=None meaning unbounded; None if invalid."""
+    if tier is None:
+        return None
+    t = tier.strip().lower().replace("gb", "")
+    if "-" in t:
+        lo, _, hi = t.partition("-")
+        try:
+            return float(lo), float(hi)
+        except ValueError:
+            return None
+    try:
+        return float(t), None
+    except ValueError:
+        return None
+
+
+def _model_tier_label(resident_gb):
+    """Coarse RAM tier for a model's resident footprint (Group 45 #1)."""
+    if resident_gb <= 1.5:
+        return "1-2GB"
+    if resident_gb <= 4:
+        return "2-4GB"
+    if resident_gb <= 8:
+        return "4-8GB"
+    if resident_gb <= 16:
+        return "8-16GB"
+    return "16GB+"
+
+
+def catalog_list(tier=None, specs=None):
+    """All catalog entries with tier + fit info (Group 45 #4). Each entry:
+    {id, repo, params_b, tier, resident_gb, download_gb, thinking, stability,
+    note, fits: {ram, disk} | null} — fits evaluated against `specs` when given."""
+    lo_hi = _tier_bounds(tier)
+    entries = []
+    for m in CATALOG:
+        resident = round(m.get("params_b", 1.0) * 0.35 + 0.35, 2)
+        if lo_hi is not None:
+            lo, hi = lo_hi
+            if resident < lo or (hi is not None and resident > hi):
+                continue
+        e = {
+            "id": m["id"], "repo": m["repo"], "params_b": m["params_b"],
+            "tier": _model_tier_label(resident), "resident_gb": resident,
+            "download_gb": m.get("dl_gb", m.get("shard_gb", 1.0) * 3.2),
+            "thinking": m.get("thinking", False),
+            "stability": m.get("stability", 1.0), "note": m.get("note", ""),
+            "fits": None,
+        }
+        if specs:
+            s, b = score(m, specs)
+            if s is not None:
+                e["fits"] = {"ram": True, "disk": True, "score": s,
+                             "resident_gb": b["resident_gb"],
+                             "download_gb": b["download_gb"]}
+            else:
+                e["fits"] = {"ram": "RAM" not in b and "download" not in b,
+                             "disk": "download" not in b,
+                             "reason": b}
+        entries.append(e)
+    return {"tier_filter": tier, "count": len(entries), "entries": entries}
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="androidllm.modelpicker",
                                  description=__doc__)
-    ap.add_argument("mode", choices=["pick", "search", "specs"])
+    ap.add_argument("mode", choices=["pick", "search", "specs", "list"])
     ap.add_argument("--specs", help='manual specs, e.g. "8gb ram 32gb storage"')
     ap.add_argument("--q", default="qwen instruct", help="HF search query")
+    ap.add_argument("--tier", default=None,
+                    help="RAM tier filter, e.g. '4-8' (fits 4-8 GB) or '8' (=8+ GB)")
     args = ap.parse_args(argv)
 
     if args.mode == "specs":
         _emit(specs_from_text(args.specs))
+        return
+
+    if args.mode == "list":
+        _emit(catalog_list(tier=args.tier, specs=specs_from_text(args.specs)))
         return
 
     specs = specs_from_text(args.specs)

@@ -6,6 +6,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `modelpicker list` CLI: full catalog with RAM-tier labels, `--tier` filter
+  (e.g. `4-8` for 4-8 GB RAM) and per-model fit flags vs `--specs`
+- `/v1/token-count` endpoint (OpenAI-style token counting for prompt budgets)
+
 ## [0.2.1] - 2026-08-02
 
 ### Added

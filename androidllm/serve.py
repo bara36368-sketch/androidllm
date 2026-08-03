@@ -280,6 +280,11 @@ _ROUTES = [
     (re.compile(r"^/chat/completions$"), "chat"),
 ]
 
+_TOKEN_ONLY_ROUTES = [
+    (re.compile(r"^/v1/token-count$"), "chat"),
+    (re.compile(r"^/token-count$"), "chat"),
+]
+
 
 def run_server(engine, host="127.0.0.1", port=8080):
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -443,6 +448,22 @@ def run_server(engine, host="127.0.0.1", port=8080):
                 return
             length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(length).decode("utf-8"))
+            for pat, kind in _TOKEN_ONLY_ROUTES:
+                if pat.match(self.path):
+                    if engine.tokenizer is None:
+                        self._reply(500, {"error": "model has no tokenizer; "
+                                                   "convert it with androidllm-shard"})
+                        return
+                    if kind == "chat":
+                        ids = _chat_prompt_ids(engine, body.get("messages", []))
+                    else:
+                        ids = engine.tokenizer.encode(body.get("prompt", ""))
+                    self._reply(200, {
+                        "object": "token.count",
+                        "prompt_tokens": len(ids),
+                        "model": _parse_model_name(engine, body.get("model")),
+                    })
+                    return
             for pat, kind in _ROUTES:
                 if pat.match(self.path):
                     if getattr(engine, "paused", False):

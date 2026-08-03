@@ -54,10 +54,23 @@ automatically. Source tensors may be fp16/fp32/bf16 and may span
 androidllm-serve --model models/qwen15 --port 8080
 ```
 
-Endpoints: `/v1/completions`, `/v1/chat/completions`, `/v1/models`, `/health`.
+Endpoints: `/v1/completions`, `/v1/chat/completions`, `/v1/models`,
+`/v1/token-count`, `/health`.
 Both completion endpoints accept `"stream": true` and return OpenAI-style SSE
 (`data:` frames per token, `data: [DONE]` at the end). Chat uses the model's
 own chat template (Qwen/llama3/smollm styles).
+`/v1/token-count` returns `{"prompt_tokens": N}` for a `messages` or `prompt`
+body — handy for context budgeting before a call.
+
+### Model catalog
+
+```
+python -m androidllm.modelpicker list                 # all models + RAM tiers
+python -m androidllm.modelpicker list --tier 4-8      # only models fitting 4-8 GB RAM
+python -m androidllm.modelpicker list --specs "8gb ram 32gb storage"
+                                                      # per-model fit flags vs a device
+python -m androidllm.modelpicker pick --specs "4gb ram 16gb storage"   # best for a device
+```
 
 3. **Optional NEON kernel** (much faster matmul, ~2x):
 
