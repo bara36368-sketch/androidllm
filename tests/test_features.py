@@ -223,6 +223,82 @@ def test_battery_pause_logic():
     print("battery pause logic OK")
 
 
+def test_runtime_presets_switch_threads():
+    from androidllm import serve
+    from androidllm import neon
+    assert serve.apply_preset("power-saving")["threads"] == 1
+    assert neon._THREADS == 1
+    assert serve.apply_preset("balanced")["threads"] == 2
+    assert neon._THREADS == 2
+    assert serve.apply_preset("performance")["threads"] == 4
+    assert neon._THREADS == 4
+    assert serve.apply_preset("turbo") is None  # unknown rejected
+    cur = serve.current_preset()
+    assert cur["name"] == "performance" and cur["threads"] == 4
+    assert len(cur["advice"]) >= 3  # ctx-512, swap, Doze, KleidiAI tips
+    # battery policy caps from the active preset's thread count
+    assert serve.pick_threads({"capacity": 30, "charging": False, "temp_c": 30}, 4) == 2
+    assert serve.pick_threads({"capacity": 90, "charging": True, "temp_c": 40}, 2) == 2
+    print("runtime presets OK")
+
+
+def test_preset_http_endpoints(tmp_path, monkeypatch):
+    import json
+    import time
+    import urllib.request
+    import urllib.error
+    import threading
+    from androidllm import serve
+    from androidllm import neon
+
+    class FakeEngine:
+        tokenizer = None
+        paused = False
+        ctx_len = 2048
+        canon = {"layers": 4, "kv_heads": 4, "head_dim": 32}
+        draft = None
+        spec_k = 0
+
+        def snapshot(self):
+            return {"uptime_s": 0, "tokens": 0}
+
+    monkeypatch.setenv("ANDROIDLLM_PRESET", "balanced")
+    monkeypatch.setattr(serve, "_load_api_key", lambda: ("", False))
+    port = 8271
+    engine = FakeEngine()
+    t = threading.Thread(target=serve.run_server,
+                         args=(engine, "127.0.0.1", port), daemon=True)
+    t.start()
+    time.sleep(1.5)
+
+    def http(method, path, body=None):
+        req = urllib.request.Request(f"http://127.0.0.1:{port}{path}",
+                                     method=method)
+        if body is not None:
+            req.add_header("Content-Type", "application/json")
+            req.data = json.dumps(body).encode("utf-8")
+        try:
+            with urllib.request.urlopen(req, timeout=5) as r:
+                return r.status, json.loads(r.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read().decode("utf-8"))
+
+    status, cur = http("GET", "/v1/preset")
+    assert status == 200
+    assert cur["name"] == "balanced" and cur["threads"] == 2
+    assert len(cur["advice"]) >= 3
+
+    status, switched = http("POST", "/v1/preset", {"preset": "power-saving"})
+    assert status == 200
+    assert switched["name"] == "power-saving" and switched["threads"] == 1
+    assert neon._THREADS == 1
+
+    status, err = http("POST", "/v1/preset", {"preset": "turbo"})
+    assert status == 400
+    assert err["available"] == ["balanced", "performance", "power-saving"]
+    print("preset http endpoints OK")
+
+
 if __name__ == "__main__":
     test_embed_quant_roundtrip()
     test_engine_embed_quant_path()
@@ -233,4 +309,5 @@ if __name__ == "__main__":
     test_grammar_string_and_number()
     test_grammar_end_to_end_object()
     test_think_strip()
+    test_runtime_presets_switch_threads()
     test_battery_pause_logic()

@@ -18,6 +18,7 @@ CLI (JSON on stdout):
 """
 import argparse
 import json
+import os
 import sys
 import time
 
@@ -92,6 +93,58 @@ CATALOG = [
 # llama-arch search filter on the HF API
 _ARCH_FILTERS = {"llama", "qwen", "smollm", "mistral"}
 
+# ---------------------------------------------------------------- benchmarks (6)
+# Measured tok/s overrides the size-based speed estimate: bench records
+# {model_id: {"tps": x, "device": ..., "ts": ...}} in ANDROIDLLM_BENCH
+# (default ~/.androidllm/bench.json). Pick/scoring use measured numbers when
+# present, so defaults are informed by real runs on this phone.
+
+_BENCH_PATH = os.environ.get("ANDROIDLLM_BENCH",
+                             os.path.join(os.path.expanduser("~"),
+                                          ".androidllm", "bench.json"))
+
+
+def _load_bench():
+    try:
+        with open(_BENCH_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_bench(data):
+    os.makedirs(os.path.dirname(_BENCH_PATH), exist_ok=True)
+    tmp = _BENCH_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=1)
+    os.replace(tmp, _BENCH_PATH)
+
+
+def bench_add(model_id, tps, device="", note=""):
+    """Record a measured tok/s for a model (from a real serve run)."""
+    data = _load_bench()
+    data[model_id] = {"tps": float(tps), "device": str(device)[:40],
+                      "ts": int(time.time()), "note": str(note)[:80]}
+    _save_bench(data)
+    return data[model_id]
+
+
+def bench_list():
+    return _load_bench()
+
+
+def bench_clear():
+    try:
+        os.remove(_BENCH_PATH)
+    except OSError:
+        pass
+
+
+def measured_tps(model_id):
+    """Measured tok/s for a catalog id, or None when unmeasured."""
+    return _load_bench().get(model_id, {}).get("tps")
+
 
 def _est_speed(params_b):
     """tok/s estimate on G85-class (eMMC layer streaming, numpy base)."""
@@ -106,7 +159,8 @@ def _smart(params_b, thinking=False):
 
 
 def score(model, specs, est_speed=None):
-    """Return (score, breakdown) or (None, reason) when it doesn't fit."""
+    """Return (score, breakdown) or (None, reason) when it doesn't fit.
+    Measured benchmark tok/s for the model overrides the estimate (Group 6)."""
     ram = specs.get("ram_gb") or 0.0
     disk = specs.get("disk_free_gb") or 0.0
     params_b = model.get("params_b", 1.0)
@@ -120,14 +174,22 @@ def score(model, specs, est_speed=None):
         return None, f"{resident:.2f} GB resident > {available:.1f} GB available RAM"
     if need_dl > max(disk * 0.9, 0.5):
         return None, f"{need_dl:.1f} GB download needs {need_dl:.1f} GB free (have {disk:.1f})"
-    speed = est_speed(params_b) if est_speed else _est_speed(params_b)
+    if est_speed:
+        speed = est_speed(params_b)
+        measured = False
+    else:
+        speed = measured_tps(model.get("id", ""))
+        measured = speed is not None
+        if not measured:
+            speed = _est_speed(params_b)
     sp = min(1.0, speed / 1.2)
     sm = _smart(params_b, model.get("thinking", False))
     st = float(model.get("stability", 1.0))
     total = round(0.45 * sp + 0.35 * sm + 0.20 * st, 3)
     return total, {
         "speed": sp, "smart": sm, "stable": st,
-        "est_tps": round(speed, 2), "resident_gb": round(resident, 2),
+        "est_tps": round(speed, 2), "measured": measured,
+        "resident_gb": round(resident, 2),
         "download_gb": round(need_dl, 1), "shard_gb": round(shard, 2),
     }
 
@@ -302,12 +364,32 @@ def catalog_list(tier=None, specs=None):
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="androidllm.modelpicker",
                                  description=__doc__)
-    ap.add_argument("mode", choices=["pick", "search", "specs", "list"])
+    ap.add_argument("mode", choices=["pick", "search", "specs", "list", "bench"])
     ap.add_argument("--specs", help='manual specs, e.g. "8gb ram 32gb storage"')
     ap.add_argument("--q", default="qwen instruct", help="HF search query")
     ap.add_argument("--tier", default=None,
                     help="RAM tier filter, e.g. '4-8' (fits 4-8 GB) or '8' (=8+ GB)")
+    ap.add_argument("--id", default=None, help="bench: catalog model id (e.g. qwen15)")
+    ap.add_argument("--tps", type=float, default=None, help="bench: measured tok/s")
+    ap.add_argument("--device", default="", help="bench: device label")
+    ap.add_argument("--note", default="", help="bench: note")
+    ap.add_argument("--clear", action="store_true", help="bench: wipe records")
     args = ap.parse_args(argv)
+
+    if args.mode == "bench":
+        if args.clear:
+            bench_clear()
+            _emit({"cleared": True})
+            return
+        if args.tps is not None:
+            if not args.id:
+                sys.stderr.write("--id is required with --tps\n")
+                return 2
+            rec = bench_add(args.id, args.tps, args.device, args.note)
+            _emit({"added": rec})
+            return
+        _emit({"path": _BENCH_PATH, "records": bench_list()})
+        return
 
     if args.mode == "specs":
         _emit(specs_from_text(args.specs))

@@ -38,3 +38,33 @@ def test_catalog_list_unknown_tier_is_none():
     assert mp._tier_bounds(None) is None
     assert mp._tier_bounds("4-8") == (4.0, 8.0)
     assert mp._tier_bounds("8") == (8.0, None)
+
+
+# ------------------------------------------------------------------ benchmark-informed defaults (6)
+
+def test_bench_roundtrip(tmp_path, monkeypatch):
+    monkeypatch.setattr(mp, "_BENCH_PATH", str(tmp_path / "bench.json"))
+    mp.bench_add("qwen15", 4.2, "g85", "measured run")
+    assert mp.measured_tps("qwen15") == 4.2
+    assert mp.measured_tps("smollm2") is None
+    assert mp.bench_list()["qwen15"]["device"] == "g85"
+    mp.bench_clear()
+    assert mp.measured_tps("qwen15") is None
+
+
+def test_score_uses_measured_tps(tmp_path, monkeypatch):
+    monkeypatch.setattr(mp, "_BENCH_PATH", str(tmp_path / "bench.json"))
+    mp.bench_add("qwen15", 9.0, "g85")
+    specs = {"ram_gb": 8, "disk_free_gb": 64}
+    _, breakdown = mp.score(next(m for m in mp.CATALOG if m["id"] == "qwen15"), specs)
+    assert breakdown["measured"] is True
+    assert breakdown["est_tps"] == 9.0
+    assert breakdown["speed"] == 1.0  # 9 tok/s caps the speed component
+
+
+def test_score_estimates_without_benchmark(tmp_path, monkeypatch):
+    monkeypatch.setattr(mp, "_BENCH_PATH", str(tmp_path / "bench.json"))
+    specs = {"ram_gb": 8, "disk_free_gb": 64}
+    _, breakdown = mp.score(next(m for m in mp.CATALOG if m["id"] == "qwen15"), specs)
+    assert breakdown["measured"] is False
+    assert breakdown["est_tps"] == round(mp._est_speed(1.54), 2)

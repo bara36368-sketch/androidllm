@@ -160,13 +160,66 @@ def start_battery_policy(engine, interval=30):
                     engine.throttle_ms = 0
                 else:
                     engine.throttle_ms = 20 if (cap is not None and cap <= 15) else 0
-                neon.set_threads(pick_threads(info, _BASE_THREADS))
+                preset = _PRESETS[_CURRENT_PRESET[0]] if _CURRENT_PRESET[0] else _PRESETS["performance"]
+                neon.set_threads(pick_threads(info, preset["threads"]))
             except Exception:
                 pass
     threading.Thread(target=loop, daemon=True).start()
 
 
 _BASE_THREADS = int(os.environ.get("ANDROIDLLM_THREADS", "4"))
+
+
+# -- big.LITTLE runtime presets (22) --------------------------------------
+# Thread-mode profiles for the two CPU clusters; switchable at runtime via
+# POST /v1/preset so the phone can jump between modes mid-serve.
+
+_PRESETS = {
+    "power-saving": {
+        "threads": 1,
+        "label": "1 thread (E-cores), minimum drain — background keep-alive",
+    },
+    "balanced": {
+        "threads": 2,
+        "label": "2 threads (P-cores), good perf/battery trade-off",
+    },
+    "performance": {
+        "threads": 4,
+        "label": "4 threads (P-cores), max throughput",
+    },
+}
+
+
+def preset_advice():
+    """Free wins to pair with a preset (Group 22)."""
+    return [
+        "cap max_tokens ~512 (ctx 512) for ~30% faster turns than 2048",
+        "enable an Android swap file (Settings > Developer options > swap size) for 7B+",
+        "exempt androidllm from Doze/App Standby so serving stays alive",
+        "rebuild _libandroidllm_neon.so with -march=armv8.2-a+fp16+dotprod -O3 "
+        "-fopenmp for KleidiAI/NEON fast paths",
+        "power-saving pins 1 thread; balanced 2 P-cores; performance 4 P-cores",
+    ]
+
+
+_CURRENT_PRESET = [None]
+
+
+def apply_preset(name):
+    """Switch the active preset; returns its spec dict (or None if unknown)."""
+    spec = _PRESETS.get(name)
+    if spec is None:
+        return None
+    _CURRENT_PRESET[0] = name
+    neon.set_threads(spec["threads"])
+    return spec
+
+
+def current_preset():
+    spec = dict(_PRESETS.get(_CURRENT_PRESET[0], _PRESETS["performance"]))
+    spec["name"] = _CURRENT_PRESET[0] or "performance"
+    spec["advice"] = preset_advice()
+    return spec
 
 
 # -- reasoning-tag stripping ----------------------------------------------
@@ -301,6 +354,7 @@ def run_server(engine, host="127.0.0.1", port=8080):
     pool = SessionPool(engine, max_pooled=4)
     idle_since = time.time()
     idle_pause = int(os.environ.get("ANDROIDLLM_IDLE_PAUSE", "0"))
+    apply_preset(os.environ.get("ANDROIDLLM_PRESET") or "performance")
 
     def _finish(sess):
         pool.put(sess)
@@ -335,7 +389,7 @@ def run_server(engine, host="127.0.0.1", port=8080):
             if self.path == "/health":
                 idle_since = time.time()
                 self._reply(200, {"status": "ok"})
-            elif self.path in ("/v1/models", "/stats", "/v1/keys") or self.path.startswith("/v1/"):
+            elif self.path in ("/v1/models", "/stats", "/v1/keys", "/v1/preset") or self.path.startswith("/v1/"):
                 if not _check_auth(self, api_key):
                     return
                 idle_since = time.time()
@@ -344,6 +398,8 @@ def run_server(engine, host="127.0.0.1", port=8080):
                 elif self.path == "/v1/keys":
                     self._reply(200, {"api_key": api_key,
                                       "base_url": f"http://{host}:{port}/v1"})
+                elif self.path == "/v1/preset":
+                    self._reply(200, current_preset())
                 else:
                     info = battery_info()
                     snap = dict(engine.snapshot(), battery=info)
@@ -448,6 +504,15 @@ def run_server(engine, host="127.0.0.1", port=8080):
                 return
             length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(length).decode("utf-8"))
+            if self.path == "/v1/preset":
+                name = str(body.get("preset") or "")
+                spec = apply_preset(name)
+                if spec is None:
+                    self._reply(400, {"error": "unknown preset",
+                                      "available": sorted(_PRESETS)})
+                else:
+                    self._reply(200, current_preset())
+                return
             for pat, kind in _TOKEN_ONLY_ROUTES:
                 if pat.match(self.path):
                     if engine.tokenizer is None:
@@ -570,9 +635,16 @@ def main():
     ap.add_argument("--api-key", default=os.environ.get("ANDROIDLLM_API_KEY", ""),
                     help="require this key via Authorization: Bearer; "
                          "defaults to a random key generated on first run")
+    ap.add_argument("--preset", default=None,
+                    choices=sorted(_PRESETS),
+                    help="thread-mode preset: power-saving | balanced | "
+                         "performance (also ANDROIDLLM_PRESET; switchable "
+                         "at runtime via POST /v1/preset)")
     args = ap.parse_args()
     if args.api_key:
         os.environ["ANDROIDLLM_API_KEY"] = args.api_key
+    if args.preset:
+        os.environ["ANDROIDLLM_PRESET"] = args.preset
     engine = build_engine(args.model)
     run_server(engine, args.host, args.port)
 
