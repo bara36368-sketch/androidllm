@@ -81,6 +81,18 @@ def build_engine(model_dir):
     keep = int(os.environ.get("ANDROIDLLM_KEEP_LAYERS", "0"))
     draft = _draft_dir()
     spec_k = int(os.environ.get("ANDROIDLLM_SPEC_K", "0"))
+    # LocalAI-gallery-style defaults: the installer (pull.py) writes
+    # model.conf.json next to the shards with a recommended ctx; honor it
+    # unless the operator explicitly overrode ANDROIDLLM_MAX_CTX.
+    if not os.environ.get("ANDROIDLLM_MAX_CTX"):
+        conf = os.path.join(model_dir, "model.conf.json")
+        try:
+            with open(conf, encoding="utf-8") as f:
+                ctx = int(json.load(f).get("ctx", 0))
+            if ctx > 0:
+                os.environ["ANDROIDLLM_MAX_CTX"] = str(ctx)
+        except (OSError, ValueError, TypeError):
+            pass
     engine = LayerStreamingEngine(model_dir, keep_layers=keep,
                                   draft_dir=draft, spec_k=spec_k)
     if engine.draft is None and spec_k > 0 and draft:
@@ -302,11 +314,62 @@ def _chat_prompt_ids(engine, messages):
 
 
 def _models_list(engine):
-    return {
-        "object": "list",
-        "data": [{"id": _parse_model_name(engine, None), "object": "model",
-                  "created": int(time.time()), "owned_by": "androidllm"}],
-    }
+    data = [{"id": _parse_model_name(engine, None), "object": "model",
+             "created": int(time.time()), "owned_by": "androidllm",
+             "status": "loaded"}]
+    try:
+        from . import pull as pull_mod
+        for e in pull_mod.installed_list():
+            data.append({"id": e["id"], "object": "model",
+                         "created": e.get("installed_ts", int(time.time())),
+                         "owned_by": "androidllm", "status": "installed",
+                         "dir": e.get("dir"), "size_gb": e.get("size_gb")})
+    except Exception:
+        pass
+    return {"object": "list", "data": data}
+
+
+# -- remote model install (lemonade /v1/pull flow) ------------------------
+# POST /v1/pull {model: id-or-repo} kicks off pull.py in a background
+# thread; GET /v1/pulls/{id} polls status. Lets a desktop browser push a
+# model to a phone whose server is already running.
+
+_PULL_JOBS = {}
+_PULL_LOCK = threading.Lock()
+
+
+def _pull_job_id():
+    with _PULL_LOCK:
+        stale = [j for j, s in _PULL_JOBS.items()
+                 if s.get("status") in ("done", "error")]
+        for j in stale[:8]:
+            _PULL_JOBS.pop(j, None)
+        return f"pull_{int(time.time() * 1000)}"
+
+
+def _pull_worker(jid, ident, attn_bits, mlp_bits, embed_bits):
+    def progress(n, total, path):
+        with _PULL_LOCK:
+            job = _PULL_JOBS.get(jid)
+            if job:
+                job.update({"stage": "download", "file": path,
+                            "bytes": n, "total": total})
+    try:
+        from . import pull as pull_mod
+        conf = pull_mod.pull(ident, attn_bits, mlp_bits, embed_bits,
+                             progress=progress)
+        with _PULL_LOCK:
+            job = _PULL_JOBS.get(jid)
+            if job:
+                job.update({"status": "done", "stage": "done",
+                            "model": conf["id"], "repo": conf["repo"],
+                            "size_gb": conf.get("size_gb")})
+    except Exception as exc:
+        with _PULL_LOCK:
+            job = _PULL_JOBS.get(jid)
+            if job:
+                job.update({"status": "error", "stage": "error",
+                            "error": str(exc)})
 
 
 def _grammar(body):
@@ -400,6 +463,13 @@ def run_server(engine, host="127.0.0.1", port=8080):
                                       "base_url": f"http://{host}:{port}/v1"})
                 elif self.path == "/v1/preset":
                     self._reply(200, current_preset())
+                elif self.path.startswith("/v1/pulls/"):
+                    with _PULL_LOCK:
+                        job = _PULL_JOBS.get(self.path[len("/v1/pulls/"):])
+                    if job is None:
+                        self._reply(404, {"error": "no such pull job"})
+                    else:
+                        self._reply(200, job)
                 else:
                     info = battery_info()
                     snap = dict(engine.snapshot(), battery=info)
@@ -504,6 +574,27 @@ def run_server(engine, host="127.0.0.1", port=8080):
                 return
             length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(length).decode("utf-8"))
+            if self.path == "/v1/pull":
+                ident = str(body.get("model") or "").strip()
+                if not ident:
+                    self._reply(400, {"error": "'model' (catalog id or HF repo) "
+                                              "is required"})
+                    return
+                jid = _pull_job_id()
+                with _PULL_LOCK:
+                    _PULL_JOBS[jid] = {"id": jid, "status": "started",
+                                       "stage": "resolve", "model": ident}
+                threading.Thread(
+                    target=_pull_worker,
+                    args=(jid, ident,
+                          int(body.get("attn_bits", 4)),
+                          int(body.get("mlp_bits", 8)),
+                          int(body.get("embed_bits", 8))),
+                    daemon=True).start()
+                self._reply(202, {"id": jid, "status": "started",
+                                  "model": ident,
+                                  "status_url": f"/v1/pulls/{jid}"})
+                return
             if self.path == "/v1/preset":
                 name = str(body.get("preset") or "")
                 spec = apply_preset(name)

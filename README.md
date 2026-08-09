@@ -33,7 +33,37 @@ removes the proot requirement too. numpy ships on Termux as a proper package.
 
 ## Pipeline
 
-1. **Shard** an HF model once (on desktop or phone):
+0. **Install** a model directly from the catalog (LocalAI-gallery style:
+   download → sha256 verify → auto-shard → register):
+
+```
+python -m androidllm.pull pull --id qwen15          # catalog id
+python -m androidllm.pull pull --repo Qwen/Qwen2.5-0.5B-Instruct
+python -m androidllm.pull pull --id qwen25-7b --attn-bits 4 --mlp-bits 8
+python -m androidllm.pull list                      # installed registry
+python -m androidllm.pull remove --id qwen15        # unregister (+ --delete files)
+```
+
+Installs land under `$ANDROIDLLM_DIR/models` (`~/androidllm/models` by
+default) as ready-to-serve shards plus a `model.conf.json` with the gallery
+config — recommended context length, quant bits, and stop words — that
+`serve` applies as its defaults. Download integrity is enforced with the
+sha256 from HuggingFace's LFS metadata; a mismatched file is discarded.
+
+1b. **Remote install over HTTP** (lemonade `/v1/pull` style): push a model to
+an already-running server from a desktop browser or curl:
+
+```
+curl -X POST http://phone:8080/v1/pull -d '{"model": "qwen15"}'
+# -> {"id": "pull_...", "status": "started", "status_url": "/v1/pulls/pull_..."}
+curl http://phone:8080/v1/pulls/pull_...   # poll: download stage -> done
+```
+
+The install runs in a background thread; `/v1/models` lists both the loaded
+engine model (`"status": "loaded"`) and every installed registry entry
+(`"status": "installed"`).
+
+2. **Shard** an HF model once (on desktop or phone):
 
 ```
 python -m androidllm.shard --source Qwen/Qwen2.5-1.5B-Instruct --out models/qwen15
@@ -55,7 +85,7 @@ androidllm-serve --model models/qwen15 --port 8080
 ```
 
 Endpoints: `/v1/completions`, `/v1/chat/completions`, `/v1/models`,
-`/v1/token-count`, `/health`.
+`/v1/token-count`, `/v1/preset`, `/v1/pull` + `/v1/pulls/{id}`, `/health`.
 Both completion endpoints accept `"stream": true` and return OpenAI-style SSE
 (`data:` frames per token, `data: [DONE]` at the end). Chat uses the model's
 own chat template (Qwen/llama3/smollm styles).
@@ -159,6 +189,8 @@ androidllm/          package (numpy only)
   config.py          HF config.json -> canonical config
   engine.py          LayerStreamingEngine (AirLLM-style loop + prefetch)
   models/llama.py    Llama/Qwen family forward pass (+ optional rust path)
+  modelpicker.py     catalog ranking + HF model search + bench records
+  pull.py            model installer: HF download+verify -> shard -> registry
   neon.py            fp16 matmul: NEON lib or numpy fallback
   quant.py           block-wise 4/8-bit quant, pack, dequant
   safetensors.py     minimal safetensors reader/writer
