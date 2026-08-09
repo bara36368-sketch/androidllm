@@ -139,11 +139,13 @@ class Session:
         self.token = self.prompt_ids[-1]
         self.pos = len(self.prompt_ids) - 1
         self.prefilled = True
+        self.engine._finalize_kv(self.kv, len(self.prompt_ids) - 1)
         if self.using_spec:
             self.draft_kv = e.draft.model.prepare_kv(e.ctx_len)
             for i in range(len(self.prompt_ids)):
                 e.draft._forward(e.draft.model.embed[self.prompt_ids[i]].reshape(
                     1, e.draft.model.hidden), self.draft_kv, i)
+            e._finalize_kv(self.draft_kv, len(self.prompt_ids))
         return False, []
 
 

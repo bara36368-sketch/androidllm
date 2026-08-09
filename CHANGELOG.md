@@ -10,6 +10,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `modelpicker list` CLI: full catalog with RAM-tier labels, `--tier` filter
   (e.g. `4-8` for 4-8 GB RAM) and per-model fit flags vs `--specs`
 - `/v1/token-count` endpoint (OpenAI-style token counting for prompt budgets)
+- RotorQuant/PlanarQuant-style compressed KV cache (`androidllm/kv_cache.py`):
+  block-diagonal Givens (planar) / quaternion (iso) rotations + Lloyd-Max
+  codebooks with deferred quantization (fp16 prefill staging, quantized on
+  decode insert), matching the llama.cpp planar3/iso3 layout (~5.1x smaller
+  KV); enabled with `ANDROIDLLM_KV_BITS=3|4` and `ANDROIDLLM_KV_ROT=planar|iso`
 
 ## [0.2.1] - 2026-08-02
 

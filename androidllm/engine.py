@@ -263,6 +263,15 @@ class LayerStreamingEngine:
                 self.stats["compute_tokens"] += 1
         return x
 
+    def _finalize_kv(self, kv, n):
+        """If kv is compressed (QuantizedKVCache), absorb the staged fp16
+        prefill window into the quantized store; no-op for fp16 caches."""
+        from .kv_cache import QuantizedKVCache as _QKV
+        for li in range(self.n_layers):
+            c = kv[li]
+            if isinstance(c, _QKV):
+                c.finalize(n)
+
     def _score(self, x):
         return self.model.logits(x)
 
@@ -340,6 +349,7 @@ class LayerStreamingEngine:
                           kv, i)
             if (i % self._prefill_chunk) == 0:
                 gc.collect()
+        self._finalize_kv(kv, len(prompt_ids) - 1)
         token = prompt_ids[-1]
         pos = len(prompt_ids) - 1
         if spec:
@@ -348,6 +358,7 @@ class LayerStreamingEngine:
                 self.draft._forward(
                     self.draft.model.embed[prompt_ids[i]].reshape(1, self.draft.model.hidden),
                     self.draft_kv, i)
+            self._finalize_kv(self.draft_kv, len(prompt_ids))
 
         generated = []
         buf_parts = []

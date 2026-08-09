@@ -3,6 +3,7 @@ import os
 
 import numpy as np
 
+from ..kv_cache import QuantizedKVCache
 from ..neon import matmul_f16
 
 # Optional Rust acceleration
@@ -68,7 +69,7 @@ class LlamaModel:
         self.rope = precompute_rope(self.head_dim, canon["max_len"], self.rope_theta)
 
     def layer_forward(self, x, layer, kv, pos):
-        if _HAS_RS:
+        if _HAS_RS and not isinstance(kv, QuantizedKVCache):
             # x: (1, hidden) f32 -> f16 for rust
             # kv_k, kv_v: (max_len, kv_heads, head_dim) f16
             kv_k, kv_v = kv
@@ -98,9 +99,16 @@ class LlamaModel:
         v = quantized_mm(x, layer["v"]).reshape(1, self.kv_heads, self.head_dim)
         q = apply_rope(q, pos, self.rope)
         k = apply_rope(k, pos, self.rope)
-        kv_k, kv_v = kv
-        kv_k[pos, :, :] = k[0].astype(np.float16)
-        kv_v[pos, :, :] = v[0].astype(np.float16)
+        if isinstance(kv, QuantizedKVCache):
+            if kv._finalized:
+                kv.write(pos, k[0], v[0])
+            else:
+                kv.stage_write(pos, k[0], v[0])
+            kv_k, kv_v = kv.frames(pos + 1)
+        else:
+            kv_k, kv_v = kv
+            kv_k[pos, :, :] = k[0].astype(np.float16)
+            kv_v[pos, :, :] = v[0].astype(np.float16)
         g = self.heads // self.kv_heads
         k_rep = np.repeat(kv_k[: pos + 1], g, axis=1).transpose(1, 2, 0)
         v_rep = np.repeat(kv_v[: pos + 1], g, axis=1).transpose(1, 0, 2)
@@ -139,7 +147,18 @@ class LlamaModel:
 
     def prepare_kv(self, max_len):
         """Per-layer KV cache: every layer gets its own (k, v) buffers so
-        attention at layer l only ever sees layer l's keys/values."""
+        attention at layer l only ever sees layer l's keys/values.
+
+        Set ANDROIDLLM_KV_BITS=3|4 (+ ANDROIDLLM_KV_ROT=planar|iso) to use
+        the compressed RotorQuant-style cache (~5.3x smaller KV)."""
+        bits = int(os.environ.get("ANDROIDLLM_KV_BITS", "0") or "0")
+        rot = os.environ.get("ANDROIDLLM_KV_ROT", "planar")
+        if bits in (2, 3, 4, 5):
+            return [
+                QuantizedKVCache(max_len, self.kv_heads, self.head_dim,
+                                 bits=bits, rotation=rot)
+                for _ in range(self.canon["layers"])
+            ]
         shape = (max_len, self.kv_heads, self.head_dim)
         return [(np.zeros(shape, dtype=np.float16), np.zeros(shape, dtype=np.float16))
                 for _ in range(self.canon["layers"])]
